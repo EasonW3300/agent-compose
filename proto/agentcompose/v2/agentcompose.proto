@@ -53,6 +53,12 @@ service RunService {
   // was already terminal; it never means that submission failed. Disconnecting
   // after submission does not cancel the run; use StopRun to cancel it.
   rpc StartAgentRun(StartAgentRunRequest) returns (StartAgentRunResponse);
+  // Creates or reuses a persistent interactive Agent Run and returns after
+  // submission. Clients send each human reply through SendRunHumanMessage.
+  rpc StartInteractiveAgentRun(StartAgentRunRequest) returns (StartAgentRunResponse);
+  // Appends an idempotently identified human message to a persistent
+  // interactive Agent Run.
+  rpc SendRunHumanMessage(SendRunHumanMessageRequest) returns (SendRunHumanMessageResponse);
   // Creates a persistent Agent Run and projects started, output, status, and
   // completed events for non-interactive clients. The completed run has the same
   // terminal state and common fields as RunAgent/GetRun. Client cancellation
@@ -181,6 +187,9 @@ enum RunStatus {
   RUN_STATUS_SUCCEEDED = 3;
   RUN_STATUS_FAILED = 4;
   RUN_STATUS_CANCELED = 5;
+  RUN_STATUS_WAITING_FOR_INPUT = 6;
+  RUN_STATUS_TIMED_OUT = 7;
+  RUN_STATUS_INTERRUPTED = 8;
 }
 
 enum RunSource {
@@ -1911,6 +1920,16 @@ message StartAgentRunResponse {
   RunSummary run = 1;
   repeated string warnings = 2;
   bool started = 3;
+}
+
+message SendRunHumanMessageRequest {
+  string run_id = 1;
+  string text = 2;
+  string client_message_id = 3;
+}
+
+message SendRunHumanMessageResponse {
+  RunSummary run = 1;
 }
 
 message SkillSpec {

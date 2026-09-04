@@ -3,11 +3,14 @@ package model
 import "time"
 
 const (
-	ProjectRunStatusPending   = "pending"
-	ProjectRunStatusRunning   = "running"
-	ProjectRunStatusSucceeded = "succeeded"
-	ProjectRunStatusFailed    = "failed"
-	ProjectRunStatusCanceled  = "canceled"
+	ProjectRunStatusPending         = "pending"
+	ProjectRunStatusRunning         = "running"
+	ProjectRunStatusSucceeded       = "succeeded"
+	ProjectRunStatusFailed          = "failed"
+	ProjectRunStatusCanceled        = "canceled"
+	ProjectRunStatusWaitingForInput = "waiting_for_input"
+	ProjectRunStatusTimedOut        = "timed_out"
+	ProjectRunStatusInterrupted     = "interrupted"
 
 	ProjectRunSourceManual    = "manual"
 	ProjectRunSourceScheduler = "scheduler"

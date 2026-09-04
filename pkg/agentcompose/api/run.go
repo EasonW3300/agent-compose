@@ -67,6 +67,12 @@ func ProjectRunStatusToProto(status string) agentcomposev2.RunStatus {
 		return agentcomposev2.RunStatus_RUN_STATUS_FAILED
 	case domain.ProjectRunStatusCanceled:
 		return agentcomposev2.RunStatus_RUN_STATUS_CANCELED
+	case domain.ProjectRunStatusWaitingForInput:
+		return agentcomposev2.RunStatus_RUN_STATUS_WAITING_FOR_INPUT
+	case domain.ProjectRunStatusTimedOut:
+		return agentcomposev2.RunStatus_RUN_STATUS_TIMED_OUT
+	case domain.ProjectRunStatusInterrupted:
+		return agentcomposev2.RunStatus_RUN_STATUS_INTERRUPTED
 	default:
 		return agentcomposev2.RunStatus_RUN_STATUS_UNSPECIFIED
 	}
@@ -84,6 +90,12 @@ func ProjectRunStatusFromProto(status agentcomposev2.RunStatus) string {
 		return domain.ProjectRunStatusFailed
 	case agentcomposev2.RunStatus_RUN_STATUS_CANCELED:
 		return domain.ProjectRunStatusCanceled
+	case agentcomposev2.RunStatus_RUN_STATUS_WAITING_FOR_INPUT:
+		return domain.ProjectRunStatusWaitingForInput
+	case agentcomposev2.RunStatus_RUN_STATUS_TIMED_OUT:
+		return domain.ProjectRunStatusTimedOut
+	case agentcomposev2.RunStatus_RUN_STATUS_INTERRUPTED:
+		return domain.ProjectRunStatusInterrupted
 	default:
 		return ""
 	}

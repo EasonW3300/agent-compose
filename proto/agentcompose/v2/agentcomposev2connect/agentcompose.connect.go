@@ -129,6 +129,12 @@ const (
 	// RunServiceStartAgentRunProcedure is the fully-qualified name of the RunService's StartAgentRun
 	// RPC.
 	RunServiceStartAgentRunProcedure = "/agentcompose.v2.RunService/StartAgentRun"
+	// RunServiceStartInteractiveAgentRunProcedure is the fully-qualified name of the RunService's
+	// StartInteractiveAgentRun RPC.
+	RunServiceStartInteractiveAgentRunProcedure = "/agentcompose.v2.RunService/StartInteractiveAgentRun"
+	// RunServiceSendRunHumanMessageProcedure is the fully-qualified name of the RunService's
+	// SendRunHumanMessage RPC.
+	RunServiceSendRunHumanMessageProcedure = "/agentcompose.v2.RunService/SendRunHumanMessage"
 	// RunServiceStreamAgentRunProcedure is the fully-qualified name of the RunService's StreamAgentRun
 	// RPC.
 	RunServiceStreamAgentRunProcedure = "/agentcompose.v2.RunService/StreamAgentRun"
@@ -938,6 +944,12 @@ type RunServiceClient interface {
 	// was already terminal; it never means that submission failed. Disconnecting
 	// after submission does not cancel the run; use StopRun to cancel it.
 	StartAgentRun(context.Context, *connect.Request[v2.StartAgentRunRequest]) (*connect.Response[v2.StartAgentRunResponse], error)
+	// Creates or reuses a persistent interactive Agent Run and returns after
+	// submission. Clients send each human reply through SendRunHumanMessage.
+	StartInteractiveAgentRun(context.Context, *connect.Request[v2.StartAgentRunRequest]) (*connect.Response[v2.StartAgentRunResponse], error)
+	// Appends an idempotently identified human message to a persistent
+	// interactive Agent Run.
+	SendRunHumanMessage(context.Context, *connect.Request[v2.SendRunHumanMessageRequest]) (*connect.Response[v2.SendRunHumanMessageResponse], error)
 	// Creates a persistent Agent Run and projects started, output, status, and
 	// completed events for non-interactive clients. The completed run has the same
 	// terminal state and common fields as RunAgent/GetRun. Client cancellation
@@ -978,6 +990,18 @@ func NewRunServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...
 			httpClient,
 			baseURL+RunServiceStartAgentRunProcedure,
 			connect.WithSchema(runServiceMethods.ByName("StartAgentRun")),
+			connect.WithClientOptions(opts...),
+		),
+		startInteractiveAgentRun: connect.NewClient[v2.StartAgentRunRequest, v2.StartAgentRunResponse](
+			httpClient,
+			baseURL+RunServiceStartInteractiveAgentRunProcedure,
+			connect.WithSchema(runServiceMethods.ByName("StartInteractiveAgentRun")),
+			connect.WithClientOptions(opts...),
+		),
+		sendRunHumanMessage: connect.NewClient[v2.SendRunHumanMessageRequest, v2.SendRunHumanMessageResponse](
+			httpClient,
+			baseURL+RunServiceSendRunHumanMessageProcedure,
+			connect.WithSchema(runServiceMethods.ByName("SendRunHumanMessage")),
 			connect.WithClientOptions(opts...),
 		),
 		streamAgentRun: connect.NewClient[v2.RunAgentRequest, v2.StreamAgentRunResponse](
@@ -1033,16 +1057,18 @@ func NewRunServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...
 
 // runServiceClient implements RunServiceClient.
 type runServiceClient struct {
-	runAgent             *connect.Client[v2.RunAgentRequest, v2.RunAgentResponse]
-	startAgentRun        *connect.Client[v2.StartAgentRunRequest, v2.StartAgentRunResponse]
-	streamAgentRun       *connect.Client[v2.RunAgentRequest, v2.StreamAgentRunResponse]
-	attachAgentRun       *connect.Client[v2.AttachAgentRunRequest, v2.AttachAgentRunResponse]
-	getRun               *connect.Client[v2.GetRunRequest, v2.GetRunResponse]
-	listRuns             *connect.Client[v2.ListRunsRequest, v2.ListRunsResponse]
-	followRunLogs        *connect.Client[v2.FollowRunLogsRequest, v2.RunLogChunk]
-	stopRun              *connect.Client[v2.StopRunRequest, v2.StopRunResponse]
-	listRunEvents        *connect.Client[v2.ListRunEventsRequest, v2.ListRunEventsResponse]
-	listSandboxRunEvents *connect.Client[v2.ListSandboxRunEventsRequest, v2.ListSandboxRunEventsResponse]
+	runAgent                 *connect.Client[v2.RunAgentRequest, v2.RunAgentResponse]
+	startAgentRun            *connect.Client[v2.StartAgentRunRequest, v2.StartAgentRunResponse]
+	startInteractiveAgentRun *connect.Client[v2.StartAgentRunRequest, v2.StartAgentRunResponse]
+	sendRunHumanMessage      *connect.Client[v2.SendRunHumanMessageRequest, v2.SendRunHumanMessageResponse]
+	streamAgentRun           *connect.Client[v2.RunAgentRequest, v2.StreamAgentRunResponse]
+	attachAgentRun           *connect.Client[v2.AttachAgentRunRequest, v2.AttachAgentRunResponse]
+	getRun                   *connect.Client[v2.GetRunRequest, v2.GetRunResponse]
+	listRuns                 *connect.Client[v2.ListRunsRequest, v2.ListRunsResponse]
+	followRunLogs            *connect.Client[v2.FollowRunLogsRequest, v2.RunLogChunk]
+	stopRun                  *connect.Client[v2.StopRunRequest, v2.StopRunResponse]
+	listRunEvents            *connect.Client[v2.ListRunEventsRequest, v2.ListRunEventsResponse]
+	listSandboxRunEvents     *connect.Client[v2.ListSandboxRunEventsRequest, v2.ListSandboxRunEventsResponse]
 }
 
 // RunAgent calls agentcompose.v2.RunService.RunAgent.
@@ -1053,6 +1079,16 @@ func (c *runServiceClient) RunAgent(ctx context.Context, req *connect.Request[v2
 // StartAgentRun calls agentcompose.v2.RunService.StartAgentRun.
 func (c *runServiceClient) StartAgentRun(ctx context.Context, req *connect.Request[v2.StartAgentRunRequest]) (*connect.Response[v2.StartAgentRunResponse], error) {
 	return c.startAgentRun.CallUnary(ctx, req)
+}
+
+// StartInteractiveAgentRun calls agentcompose.v2.RunService.StartInteractiveAgentRun.
+func (c *runServiceClient) StartInteractiveAgentRun(ctx context.Context, req *connect.Request[v2.StartAgentRunRequest]) (*connect.Response[v2.StartAgentRunResponse], error) {
+	return c.startInteractiveAgentRun.CallUnary(ctx, req)
+}
+
+// SendRunHumanMessage calls agentcompose.v2.RunService.SendRunHumanMessage.
+func (c *runServiceClient) SendRunHumanMessage(ctx context.Context, req *connect.Request[v2.SendRunHumanMessageRequest]) (*connect.Response[v2.SendRunHumanMessageResponse], error) {
+	return c.sendRunHumanMessage.CallUnary(ctx, req)
 }
 
 // StreamAgentRun calls agentcompose.v2.RunService.StreamAgentRun.
@@ -1108,6 +1144,12 @@ type RunServiceHandler interface {
 	// was already terminal; it never means that submission failed. Disconnecting
 	// after submission does not cancel the run; use StopRun to cancel it.
 	StartAgentRun(context.Context, *connect.Request[v2.StartAgentRunRequest]) (*connect.Response[v2.StartAgentRunResponse], error)
+	// Creates or reuses a persistent interactive Agent Run and returns after
+	// submission. Clients send each human reply through SendRunHumanMessage.
+	StartInteractiveAgentRun(context.Context, *connect.Request[v2.StartAgentRunRequest]) (*connect.Response[v2.StartAgentRunResponse], error)
+	// Appends an idempotently identified human message to a persistent
+	// interactive Agent Run.
+	SendRunHumanMessage(context.Context, *connect.Request[v2.SendRunHumanMessageRequest]) (*connect.Response[v2.SendRunHumanMessageResponse], error)
 	// Creates a persistent Agent Run and projects started, output, status, and
 	// completed events for non-interactive clients. The completed run has the same
 	// terminal state and common fields as RunAgent/GetRun. Client cancellation
@@ -1144,6 +1186,18 @@ func NewRunServiceHandler(svc RunServiceHandler, opts ...connect.HandlerOption) 
 		RunServiceStartAgentRunProcedure,
 		svc.StartAgentRun,
 		connect.WithSchema(runServiceMethods.ByName("StartAgentRun")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runServiceStartInteractiveAgentRunHandler := connect.NewUnaryHandler(
+		RunServiceStartInteractiveAgentRunProcedure,
+		svc.StartInteractiveAgentRun,
+		connect.WithSchema(runServiceMethods.ByName("StartInteractiveAgentRun")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runServiceSendRunHumanMessageHandler := connect.NewUnaryHandler(
+		RunServiceSendRunHumanMessageProcedure,
+		svc.SendRunHumanMessage,
+		connect.WithSchema(runServiceMethods.ByName("SendRunHumanMessage")),
 		connect.WithHandlerOptions(opts...),
 	)
 	runServiceStreamAgentRunHandler := connect.NewServerStreamHandler(
@@ -1200,6 +1254,10 @@ func NewRunServiceHandler(svc RunServiceHandler, opts ...connect.HandlerOption) 
 			runServiceRunAgentHandler.ServeHTTP(w, r)
 		case RunServiceStartAgentRunProcedure:
 			runServiceStartAgentRunHandler.ServeHTTP(w, r)
+		case RunServiceStartInteractiveAgentRunProcedure:
+			runServiceStartInteractiveAgentRunHandler.ServeHTTP(w, r)
+		case RunServiceSendRunHumanMessageProcedure:
+			runServiceSendRunHumanMessageHandler.ServeHTTP(w, r)
 		case RunServiceStreamAgentRunProcedure:
 			runServiceStreamAgentRunHandler.ServeHTTP(w, r)
 		case RunServiceAttachAgentRunProcedure:
@@ -1231,6 +1289,14 @@ func (UnimplementedRunServiceHandler) RunAgent(context.Context, *connect.Request
 
 func (UnimplementedRunServiceHandler) StartAgentRun(context.Context, *connect.Request[v2.StartAgentRunRequest]) (*connect.Response[v2.StartAgentRunResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("agentcompose.v2.RunService.StartAgentRun is not implemented"))
+}
+
+func (UnimplementedRunServiceHandler) StartInteractiveAgentRun(context.Context, *connect.Request[v2.StartAgentRunRequest]) (*connect.Response[v2.StartAgentRunResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("agentcompose.v2.RunService.StartInteractiveAgentRun is not implemented"))
+}
+
+func (UnimplementedRunServiceHandler) SendRunHumanMessage(context.Context, *connect.Request[v2.SendRunHumanMessageRequest]) (*connect.Response[v2.SendRunHumanMessageResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("agentcompose.v2.RunService.SendRunHumanMessage is not implemented"))
 }
 
 func (UnimplementedRunServiceHandler) StreamAgentRun(context.Context, *connect.Request[v2.RunAgentRequest], *connect.ServerStream[v2.StreamAgentRunResponse]) error {

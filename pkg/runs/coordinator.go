@@ -341,6 +341,12 @@ func NormalizeStatus(status string) string {
 		return domain.ProjectRunStatusFailed
 	case domain.ProjectRunStatusCanceled:
 		return domain.ProjectRunStatusCanceled
+	case domain.ProjectRunStatusWaitingForInput:
+		return domain.ProjectRunStatusWaitingForInput
+	case domain.ProjectRunStatusTimedOut:
+		return domain.ProjectRunStatusTimedOut
+	case domain.ProjectRunStatusInterrupted:
+		return domain.ProjectRunStatusInterrupted
 	default:
 		return domain.ProjectRunStatusPending
 	}

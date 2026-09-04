@@ -3,7 +3,13 @@ package api
 import (
 	"testing"
 	"time"
+
+	domain "agent-compose/pkg/model"
+	agentcomposev2 "agent-compose/proto/agentcompose/v2"
 )
+
+// domain supplies the persisted run-status values that these boundary mappings
+// translate to and from the generated protobuf enum.
 
 func TestFormatProjectTimePreservesInstantAndNanosecondPrecision(t *testing.T) {
 	t.Parallel()
@@ -26,5 +32,44 @@ func TestFormatProjectTimeOmitsZeroValue(t *testing.T) {
 	t.Parallel()
 	if got := FormatProjectTime(time.Time{}); got != nil {
 		t.Fatalf("FormatProjectTime(zero) = %v, want nil", got)
+	}
+}
+
+func TestProjectRunStatusFromProtoWaitsForInput(t *testing.T) {
+	t.Parallel()
+
+	if got := ProjectRunStatusFromProto(agentcomposev2.RunStatus_RUN_STATUS_WAITING_FOR_INPUT); got != domain.ProjectRunStatusWaitingForInput {
+		t.Fatalf("status = %q", got)
+	}
+}
+
+func TestProjectRunStatusToProtoWaitsForInput(t *testing.T) {
+	t.Parallel()
+
+	if got := ProjectRunStatusToProto(domain.ProjectRunStatusWaitingForInput); got != agentcomposev2.RunStatus_RUN_STATUS_WAITING_FOR_INPUT {
+		t.Fatalf("status = %v", got)
+	}
+}
+
+func TestProjectRunConversationStatusesMapBothDirections(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name   string
+		domain string
+		proto  agentcomposev2.RunStatus
+	}{
+		{"waiting for input", domain.ProjectRunStatusWaitingForInput, agentcomposev2.RunStatus_RUN_STATUS_WAITING_FOR_INPUT},
+		{"timed out", domain.ProjectRunStatusTimedOut, agentcomposev2.RunStatus_RUN_STATUS_TIMED_OUT},
+		{"interrupted", domain.ProjectRunStatusInterrupted, agentcomposev2.RunStatus_RUN_STATUS_INTERRUPTED},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ProjectRunStatusToProto(test.domain); got != test.proto {
+				t.Fatalf("ProjectRunStatusToProto(%q) = %v, want %v", test.domain, got, test.proto)
+			}
+			if got := ProjectRunStatusFromProto(test.proto); got != test.domain {
+				t.Fatalf("ProjectRunStatusFromProto(%v) = %q, want %q", test.proto, got, test.domain)
+			}
+		})
 	}
 }
