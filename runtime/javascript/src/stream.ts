@@ -66,6 +66,7 @@ export async function runStreamCommand(options: RunStreamOptions = {}): Promise<
             home: stringField(frame, "home"),
             model: stringField(frame, "model"),
             outputSchemaFile: stringField(frame, "outputSchemaFile"),
+            interactionProtocol: stringField(frame, "interactionProtocol"),
             abortController: options.abortController,
           }, emit);
           break;

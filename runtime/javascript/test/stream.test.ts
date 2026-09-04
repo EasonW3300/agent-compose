@@ -3,18 +3,22 @@ import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CODEX_SYSTEM_CONTEXT_HASH_VERSION, hashSystemContext } from "../src/codex-thread-resume.js";
-import { decodeBinary, decodeFrame, encodeBinary, encodeFrame, FRAME_VERSION, type StreamFrame } from "../src/frame.js";
+import { decodeBinary, decodeFrame, encodeBinary, encodeFrame, FRAME_VERSION, parseInteractionTurnEnvelope, type StreamFrame } from "../src/frame.js";
 import { OpenCodeRunner } from "../src/runners/opencode.js";
 import { PiRunner } from "../src/runners/pi.js";
 import { runStreamCommand } from "../src/stream.js";
 import { withTempSession } from "./helpers.js";
 
+// Frame codec helpers validate the strict interactive completion envelope independently of provider output.
+
 const runInputs: string[] = [];
+const codexRunOptions: unknown[] = [];
 let codexEventFactory: ((turn: number) => Array<Record<string, unknown>>) | undefined;
 const thread = {
   id: "thread-1",
-  async runStreamed(input: string) {
+  async runStreamed(input: string, options?: unknown) {
     runInputs.push(input);
+    codexRunOptions.push(options);
     return {
       events: asyncGenerator(codexEventFactory?.(runInputs.length) || [
         { type: "thread.started", thread_id: "thread-1" },
@@ -29,6 +33,7 @@ const resumeThread = vi.fn(() => thread);
 
 const claudeState = vi.hoisted(() => ({
   queryCalls: [] as Array<Record<string, unknown>>,
+  resultText: undefined as string | undefined,
 }));
 
 vi.mock("@openai/codex-sdk", () => ({
@@ -44,6 +49,7 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   query: vi.fn((request: Record<string, unknown>) => {
     claudeState.queryCalls.push(request);
     const turn = claudeState.queryCalls.length;
+    const resultText = claudeState.resultText ?? `claude answer ${turn}`;
     return {
       close: vi.fn(),
       [Symbol.asyncIterator]: async function* iterator() {
@@ -52,7 +58,7 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
           session_id: "claude-session-1",
           event: {
             type: "content_block_delta",
-            delta: { type: "text_delta", text: `claude answer ${turn}` },
+            delta: { type: "text_delta", text: resultText },
           },
         };
         yield {
@@ -60,7 +66,7 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
           subtype: "success",
           session_id: "claude-session-1",
           stop_reason: "end_turn",
-          result: `claude answer ${turn}`,
+          result: resultText,
         };
       },
     };
@@ -69,10 +75,12 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
 
 afterEach(() => {
   runInputs.length = 0;
+  codexRunOptions.length = 0;
   codexEventFactory = undefined;
   startThread.mockClear();
   resumeThread.mockClear();
   claudeState.queryCalls = [];
+  claudeState.resultText = undefined;
   vi.restoreAllMocks();
 });
 
@@ -100,6 +108,15 @@ describe("runtime stream frames", () => {
     expect(() => decodeFrame("not json")).toThrow(/valid JSON/);
     expect(() => encodeFrame({ v: 2, seq: 0, type: "start" })).toThrow(/version/);
     expect(() => encodeFrame({ v: FRAME_VERSION, seq: -1, type: "start" })).toThrow(/seq/);
+  });
+
+  it("parses a valid interactive turn envelope", () => {
+    expect(parseInteractionTurnEnvelope('{"agent_compose":{"state":"needs_input","message":"日志在哪？"}}'))
+      .toEqual({ state: "needs_input", message: "日志在哪？" });
+  });
+
+  it("rejects an interactive turn envelope with an unsupported state", () => {
+    expect(() => parseInteractionTurnEnvelope('{"agent_compose":{"state":"other"}}')).toThrow(/state/);
   });
 });
 
@@ -215,6 +232,34 @@ describe("runStreamCommand", () => {
     });
   });
 
+  it("emits a display-safe Codex turn state when the interaction protocol is enabled", async () => {
+    await withTempSession(async (root) => {
+      codexEventFactory = () => [
+        { type: "thread.started", thread_id: "thread-1" },
+        { type: "item.completed", item: { id: "msg", type: "agent_message", text: '{"agent_compose":{"state":"needs_input","message":"日志在哪？"}}' } },
+      ];
+      const stdout = new MemoryWritable();
+
+      await runStreamCommand({
+        stdin: Readable.from([
+          frame({ seq: 0, type: "start", provider: "codex", interactionProtocol: "agent-compose.v1", stateRoot: `${root}/state`, workspace: `${root}/workspace`, home: `${root}/home` }),
+          frame({ seq: 1, type: "human_message", message: "inspect" }),
+          frame({ seq: 2, type: "eof" }),
+        ]),
+        stdout,
+        stderr: new MemoryWritable(),
+      });
+
+      expect(parseOutput(stdout.text).find((entry) => entry.type === "agent_turn_completed")).toMatchObject({
+        finalText: "日志在哪？",
+        turnState: "needs_input",
+      });
+      expect(codexRunOptions[0]).toMatchObject({
+        outputSchema: expect.objectContaining({ type: "object" }),
+      });
+    });
+  });
+
   it("runs multiple Claude human messages by resuming the stored provider session", async () => {
     await withTempSession(async (root) => {
       const stdout = new MemoryWritable();
@@ -257,6 +302,61 @@ describe("runStreamCommand", () => {
         transcript: "claude answer 1\nclaude answer 2",
       });
       expect(stderr.text).toBe("");
+    });
+  });
+
+  it("emits a display-safe Claude turn state when the interaction protocol is enabled", async () => {
+    await withTempSession(async (root) => {
+      claudeState.resultText = '{"agent_compose":{"state":"completed","message":"All set."}}';
+      const stdout = new MemoryWritable();
+
+      await runStreamCommand({
+        stdin: Readable.from([
+          frame({ seq: 0, type: "start", provider: "claude", interactionProtocol: "agent-compose.v1", stateRoot: `${root}/state`, workspace: `${root}/workspace`, home: `${root}/home` }),
+          frame({ seq: 1, type: "human_message", message: "finish" }),
+          frame({ seq: 2, type: "eof" }),
+        ]),
+        stdout,
+        stderr: new MemoryWritable(),
+      });
+
+      expect(parseOutput(stdout.text).find((entry) => entry.type === "agent_turn_completed")).toMatchObject({
+        finalText: "All set.",
+        turnState: "completed",
+      });
+      expect(claudeState.queryCalls[0]?.options).toMatchObject({
+        outputFormat: {
+          type: "json_schema",
+          schema: expect.objectContaining({ type: "object" }),
+        },
+        systemPrompt: {
+          append: expect.stringContaining("agent-compose.v1"),
+        },
+      });
+    });
+  });
+
+  it("emits an error rather than guessing a state for malformed protocol output", async () => {
+    await withTempSession(async (root) => {
+      claudeState.resultText = '{"agent_compose":{"state":"other","message":"not valid"}}';
+      const stdout = new MemoryWritable();
+
+      await runStreamCommand({
+        stdin: Readable.from([
+          frame({ seq: 0, type: "start", provider: "claude", interactionProtocol: "agent-compose.v1", stateRoot: `${root}/state`, workspace: `${root}/workspace`, home: `${root}/home` }),
+          frame({ seq: 1, type: "human_message", message: "finish" }),
+          frame({ seq: 2, type: "eof" }),
+        ]),
+        stdout,
+        stderr: new MemoryWritable(),
+      });
+
+      const frames = parseOutput(stdout.text);
+      expect(frames.find((entry) => entry.type === "agent_turn_completed")).toBeUndefined();
+      expect(frames.find((entry) => entry.type === "error")).toMatchObject({
+        inputSeq: 1,
+        message: expect.stringContaining("agent_compose.state"),
+      });
     });
   });
 

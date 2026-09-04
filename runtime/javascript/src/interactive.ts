@@ -6,6 +6,7 @@ import {
   hashSystemContext,
 } from "./codex-thread-resume.js";
 import { stringEnv } from "./env.js";
+import { INTERACTION_PROTOCOL_VERSION, parseInteractionTurnEnvelope } from "./frame.js";
 import { warn } from "./mpi.js";
 import { buildPromptRuntimeOptions } from "./prompt.js";
 import { ClaudeRunner } from "./runners/claude.js";
@@ -16,6 +17,8 @@ import { readStoredThread, writeStoredThread } from "./session-state.js";
 import type { TextWriter, TranscriptTextWriter } from "./transcript.js";
 import type { AgentResult, Provider, RunnerOptions } from "./types.js";
 
+// The frame helpers recognize the opt-in protocol and validate its untrusted provider output.
+
 export interface InteractiveStartOptions {
   provider?: string;
   stateRoot?: string;
@@ -23,6 +26,7 @@ export interface InteractiveStartOptions {
   home?: string;
   model?: string;
   outputSchemaFile?: string;
+  interactionProtocol?: string;
   abortController?: AbortController;
 }
 
@@ -57,6 +61,7 @@ export class CodexInteractiveSession implements InteractiveSession {
   constructor(
     private readonly options: RunnerOptions,
     private readonly emit: EmitInteractiveFrame,
+    private readonly interactionProtocol: boolean,
   ) {
     this.writer = new BufferedTextWriter();
     this.runner = new CodexRunner(options, this.writer);
@@ -133,7 +138,13 @@ export class CodexInteractiveSession implements InteractiveSession {
     }
     this.result.threadId = this.thread.id || this.result.threadId;
     this.result.transcript = this.runner.transcript();
-    if (!this.result.finalText && this.result.transcript) {
+    let turnState: "needs_input" | "completed" | undefined;
+    if (this.interactionProtocol) {
+      const envelope = parseInteractionTurnEnvelope(this.result.finalText);
+      this.result.finalText = envelope.message;
+      this.result.finalTextSource = "provider_message";
+      turnState = envelope.state;
+    } else if (!this.result.finalText && this.result.transcript) {
       this.result.finalText = this.result.transcript;
       this.result.finalTextSource = "transcript_fallback";
     }
@@ -143,6 +154,7 @@ export class CodexInteractiveSession implements InteractiveSession {
       threadId: this.result.threadId,
       finalText: this.result.finalText,
       finalTextSource: this.result.finalTextSource,
+      ...(turnState ? { turnState } : {}),
     });
   }
 
@@ -183,6 +195,7 @@ class PromptRunnerInteractiveSession implements InteractiveSession {
     private readonly options: RunnerOptions,
     private readonly emit: EmitInteractiveFrame,
     createRunner: (writer: TranscriptTextWriter) => PromptTurnRunner,
+    private readonly interactionProtocol: boolean,
   ) {
     this.writer = new InteractiveTextWriter(provider, emit);
     this.runner = createRunner(this.writer);
@@ -216,10 +229,11 @@ class PromptRunnerInteractiveSession implements InteractiveSession {
     }
     this.turnCount++;
     const turnResult = await this.runner.runPrompt(message);
+    const envelope = this.interactionProtocol ? parseInteractionTurnEnvelope(turnResult.finalText) : undefined;
     this.result.threadId = turnResult.threadId || this.result.threadId;
     this.result.stopReason = turnResult.stopReason;
-    this.result.finalText = turnResult.finalText;
-    this.result.finalTextSource = turnResult.finalTextSource;
+    this.result.finalText = envelope?.message ?? turnResult.finalText;
+    this.result.finalTextSource = envelope ? "provider_message" : turnResult.finalTextSource;
     this.result.transcript = turnResult.transcript;
     this.result.stderr = turnResult.stderr;
     this.emit("agent_turn_completed", {
@@ -228,6 +242,7 @@ class PromptRunnerInteractiveSession implements InteractiveSession {
       finalText: this.result.finalText,
       finalTextSource: this.result.finalTextSource,
       stopReason: this.result.stopReason,
+      ...(envelope ? { turnState: envelope.state } : {}),
     });
   }
 
@@ -294,10 +309,11 @@ export async function createInteractiveSession(
   emit: EmitInteractiveFrame,
 ): Promise<InteractiveSession> {
   const options = await buildPromptRuntimeOptions(startOptions);
+  const interactionProtocol = startOptions.interactionProtocol === INTERACTION_PROTOCOL_VERSION;
   let session: InteractiveSession;
   switch (options.provider) {
     case "codex":
-      session = new CodexInteractiveSession(options, emit);
+      session = new CodexInteractiveSession(options, emit, interactionProtocol);
       break;
     case "claude":
       session = new PromptRunnerInteractiveSession(
@@ -305,6 +321,7 @@ export async function createInteractiveSession(
         options,
         emit,
         (writer) => new ClaudeRunner(options, writer),
+        interactionProtocol,
       );
       break;
     case "opencode":
@@ -313,6 +330,7 @@ export async function createInteractiveSession(
         options,
         emit,
         (writer) => new OpenCodeRunner(options, writer),
+        interactionProtocol,
       );
       break;
     case "pi":
@@ -321,6 +339,7 @@ export async function createInteractiveSession(
         options,
         emit,
         (writer) => new PiRunner(options, writer),
+        interactionProtocol,
       );
       break;
     default:

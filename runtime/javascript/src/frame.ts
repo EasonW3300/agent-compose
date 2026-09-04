@@ -1,4 +1,7 @@
 export const FRAME_VERSION = 1;
+export const INTERACTION_PROTOCOL_VERSION = "agent-compose.v1";
+
+export type InteractionTurnState = "needs_input" | "completed";
 
 export type InputFrameType = "start" | "human_message" | "cancel" | "eof" | "command";
 export type OutputFrameType = "started" | "agent_event" | "agent_turn_completed" | "stdout" | "stderr" | "output" | "result" | "error" | "command";
@@ -20,6 +23,17 @@ export class FrameCodecError extends Error {
     super(message);
     this.name = "FrameCodecError";
   }
+}
+
+export function parseInteractionTurnEnvelope(raw: string): { state: InteractionTurnState; message: string } {
+  const parsed = JSON.parse(raw) as { agent_compose?: { state?: unknown; message?: unknown } };
+  const control = parsed.agent_compose;
+  // The protocol is intentionally all-or-nothing: callers must surface malformed
+  // provider output as an error instead of inferring a turn state from its wording.
+  if ((control?.state !== "needs_input" && control?.state !== "completed") || typeof control.message !== "string") {
+    throw new FrameCodecError("interactive turn must contain agent_compose.state and agent_compose.message");
+  }
+  return { state: control.state, message: control.message };
 }
 
 export function encodeBinary(bytes: Uint8Array): BinaryField {

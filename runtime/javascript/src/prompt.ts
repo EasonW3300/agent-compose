@@ -2,6 +2,7 @@ import path from "node:path";
 import process from "node:process";
 import { SANDBOX_ROOT } from "./constants.js";
 import { readText } from "./fs.js";
+import { INTERACTION_PROTOCOL_VERSION } from "./frame.js";
 import { readMpiContext } from "./mpi.js";
 import { normalizeProvider } from "./provider.js";
 import { ClaudeRunner } from "./runners/claude.js";
@@ -12,7 +13,9 @@ import { OpenCodeRunner } from "./runners/opencode.js";
 import { PiRunner } from "./runners/pi.js";
 import { readMCPConfig } from "./mcp-config.js";
 import { agentSystemPromptPath, buildSystemContext, readSystemPromptFile } from "./system-context.js";
-import type { AgentResult, RuntimeJsonSchema } from "./types.js";
+import type { AgentResult, Provider, RuntimeJsonSchema } from "./types.js";
+
+// The interaction protocol marker controls the additional model context and schema below.
 
 export interface PromptCommandOptions {
   provider?: string;
@@ -28,27 +31,58 @@ export interface PromptCommandOptions {
   outputSchema?: RuntimeJsonSchema;
   skills?: string[];
   systemContextPrefix?: string;
+  interactionProtocol?: string;
   abortController?: AbortController;
 }
 
+const INTERACTION_TURN_SYSTEM_CONTEXT = `## Interactive Turn Protocol
+
+This run uses the ${INTERACTION_PROTOCOL_VERSION} interaction protocol. For every turn, return only this JSON envelope with no surrounding Markdown or commentary:
+{"agent_compose":{"state":"needs_input","message":"display-safe text for the human"}}
+
+The state must be exactly "needs_input" or "completed". Use "needs_input" only when a human reply is required to continue. Use "completed" only when the requested work is complete. The message must always be a string.`;
+
+const INTERACTION_TURN_OUTPUT_SCHEMA: RuntimeJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["agent_compose"],
+  properties: {
+    agent_compose: {
+      type: "object",
+      additionalProperties: false,
+      required: ["state", "message"],
+      properties: {
+        state: { type: "string", enum: ["needs_input", "completed"] },
+        message: { type: "string" },
+      },
+    },
+  },
+};
+
 export async function buildPromptRuntimeOptions(commandOptions: Omit<PromptCommandOptions, "messageFile">) {
   const provider = normalizeProvider(commandOptions.provider);
+  const interactionProtocol = commandOptions.interactionProtocol === INTERACTION_PROTOCOL_VERSION;
   const stateRoot = path.resolve(commandOptions.stateRoot || path.join(SANDBOX_ROOT, "state"));
   const sessionRoot = path.resolve(commandOptions.sessionRoot || stateRoot);
   const workspace = path.resolve(
     commandOptions.workspace || process.env.WORKSPACE || process.env.AGENT_COMPOSE_WORKSPACE || path.join(SANDBOX_ROOT, "workspace"),
   );
   const home = path.resolve(commandOptions.home || process.env.HOME || path.join(SANDBOX_ROOT, "home"));
-  const outputSchema = commandOptions.outputSchema ?? (commandOptions.outputSchemaFile
+  const requestedOutputSchema = commandOptions.outputSchema ?? (commandOptions.outputSchemaFile
     ? parseOutputSchema(await readText(path.resolve(commandOptions.outputSchemaFile)))
     : undefined);
+  const outputSchema = interactionProtocol && supportsInteractionTurnStructuredOutput(provider)
+    ? INTERACTION_TURN_OUTPUT_SCHEMA
+    : requestedOutputSchema;
   const systemPrompt = await readSystemPromptFile(agentSystemPromptPath(stateRoot));
   const mpi = await readMpiContext(stateRoot);
   const mcpConfig = await readMCPConfig(stateRoot);
   const skills = normalizeSkills(commandOptions.skills);
   const baseSystemContext = buildSystemContext(systemPrompt, mpi.context);
   const workflowContext = String(commandOptions.systemContextPrefix || "").trim();
-  const systemContext = [workflowContext, baseSystemContext].filter(Boolean).join("\n\n");
+  const systemContext = [workflowContext, baseSystemContext, interactionProtocol ? INTERACTION_TURN_SYSTEM_CONTEXT : ""]
+    .filter(Boolean)
+    .join("\n\n");
   return {
     provider,
     model: commandOptions.model,
@@ -66,6 +100,10 @@ export async function buildPromptRuntimeOptions(commandOptions: Omit<PromptComma
     outputSchema,
     abortController: commandOptions.abortController,
   };
+}
+
+function supportsInteractionTurnStructuredOutput(provider: Provider): boolean {
+  return provider === "codex" || provider === "claude";
 }
 
 export async function runPromptCommand(commandOptions: PromptCommandOptions): Promise<AgentResult> {
