@@ -42,6 +42,9 @@ type TransitionRequest struct {
 	LogsPath     string
 	ArtifactsDir string
 	CleanupError string
+	// StatusEventID optionally pins the durable ID for an individual lifecycle
+	// edge. Interactive resumes use a fresh ID because the same edge may recur.
+	StatusEventID string
 	// TerminalEvents are conversation records committed with this state update.
 	// Waiting transitions use the same batch so an agent message cannot outlive
 	// the status that explains why the turn paused.
@@ -234,13 +237,20 @@ func (c *Coordinator) TransitionRun(ctx context.Context, req TransitionRequest) 
 			next.StartedAt = now
 		}
 	case domain.ProjectRunStatusSucceeded, domain.ProjectRunStatusFailed, domain.ProjectRunStatusCanceled, domain.ProjectRunStatusTimedOut, domain.ProjectRunStatusInterrupted:
-		if next.StartedAt.IsZero() {
+		// A timeout or interruption can finish a queued run before work ever
+		// begins. Preserve that distinction while retaining real running times.
+		startedFromPending := current.Status == domain.ProjectRunStatusPending && (req.Status == domain.ProjectRunStatusTimedOut || req.Status == domain.ProjectRunStatusInterrupted)
+		if next.StartedAt.IsZero() && !startedFromPending {
 			next.StartedAt = now
 		}
 		if next.CompletedAt.IsZero() {
 			next.CompletedAt = now
 		}
-		next.DurationMs = max(0, next.CompletedAt.Sub(next.StartedAt).Milliseconds())
+		if next.StartedAt.IsZero() {
+			next.DurationMs = 0
+		} else {
+			next.DurationMs = max(0, next.CompletedAt.Sub(next.StartedAt).Milliseconds())
+		}
 	}
 	// Message records must survive even when a provider repeats the same
 	// nonterminal state. A status record is appended only for an actual state
@@ -248,7 +258,14 @@ func (c *Coordinator) TransitionRun(ctx context.Context, req TransitionRequest) 
 	batch := make([]domain.ProjectRunEventRecord, 0, len(req.TerminalEvents)+1)
 	batch = append(batch, req.TerminalEvents...)
 	if projectRunTransitionNeedsStatusEvent(current.Status, next.Status) {
-		batch = append(batch, projectRunTransitionStatusEvent(current, next, req.TerminalEvents))
+		statusEventID := strings.TrimSpace(req.StatusEventID)
+		// A waiting -> running edge has no companion event in this transaction,
+		// but may occur once per human reply. Give each occurrence its own ID so
+		// the event store does not idempotently collapse later resume cycles.
+		if statusEventID == "" && current.Status == domain.ProjectRunStatusWaitingForInput && next.Status == domain.ProjectRunStatusRunning {
+			statusEventID = uuid.NewString()
+		}
+		batch = append(batch, projectRunTransitionStatusEvent(current, next, req.TerminalEvents, statusEventID))
 	}
 	updated, err := c.store.UpdateProjectRunWithEvents(ctx, next, batch)
 	if err != nil {
@@ -266,13 +283,16 @@ func projectRunTransitionNeedsStatusEvent(from, to string) bool {
 	return true
 }
 
-func projectRunTransitionStatusEvent(previous, next domain.ProjectRunRecord, events []domain.ProjectRunEventRecord) domain.ProjectRunEventRecord {
+func projectRunTransitionStatusEvent(previous, next domain.ProjectRunRecord, events []domain.ProjectRunEventRecord, explicitID string) domain.ProjectRunEventRecord {
 	// Terminal status IDs stay stable for completion-journal retries. A
-	// nonterminal edge includes the accompanying event IDs, making retried
-	// client messages reuse their original status event as well.
+	// nonterminal edge includes the accompanying event IDs. A repeated resume
+	// may supply a separate ID because it is a new occurrence of the same edge.
 	eventID := terminalStatusEventID(next.RunID)
 	if !StatusIsTerminal(next.Status) {
 		eventID = transitionStatusEventID(next.RunID, previous.Status, next.Status, events)
+	}
+	if explicitID = strings.TrimSpace(explicitID); explicitID != "" {
+		eventID = explicitID
 	}
 	return domain.ProjectRunEventRecord{
 		ID: eventID, RunID: next.RunID, Kind: domain.ProjectRunEventKindStatus,

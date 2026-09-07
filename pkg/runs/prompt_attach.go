@@ -328,14 +328,17 @@ type promptWrapperInput struct {
 }
 
 func (w *promptWrapperInput) Start(agent execution.AgentConfig, config *appconfig.Config, schemaPath string) error {
+	// Negotiate the framed interaction contract so the runtime emits explicit
+	// turnState values that the durable prompt projector can interpret.
 	frame := map[string]any{
-		"v":         1,
-		"seq":       w.nextSeq(),
-		"type":      "start",
-		"provider":  agent.Provider,
-		"stateRoot": config.GuestStateRoot,
-		"workspace": config.GuestWorkspacePath,
-		"home":      config.GuestHomePath,
+		"v":                   1,
+		"seq":                 w.nextSeq(),
+		"type":                "start",
+		"interactionProtocol": "agent-compose.v1",
+		"provider":            agent.Provider,
+		"stateRoot":           config.GuestStateRoot,
+		"workspace":           config.GuestWorkspacePath,
+		"home":                config.GuestHomePath,
 	}
 	if strings.TrimSpace(agent.Model) != "" {
 		frame["model"] = strings.TrimSpace(agent.Model)

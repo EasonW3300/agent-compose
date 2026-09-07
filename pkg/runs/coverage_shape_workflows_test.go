@@ -998,7 +998,7 @@ func TestRunsControllerRunProjectPromptAttachProjectsAgentFrames(t *testing.T) {
 
 func TestRunsControllerPromptAttachPersistsNeedsInput(t *testing.T) {
 	ctx := context.Background()
-	controller, configDB, _ := newTestRunAttachController(t, []driverpkg.RuntimeOutputFrame{
+	controller, configDB, runtime := newTestRunAttachController(t, []driverpkg.RuntimeOutputFrame{
 		{Type: driverpkg.RuntimeOutputStarted},
 		{Type: driverpkg.RuntimeOutputStdout, Data: []byte(`{"v":1,"seq":0,"type":"started","provider":"claude","sessionId":"thread-1"}` + "\n")},
 		{Type: driverpkg.RuntimeOutputStdout, Data: []byte(`{"v":1,"seq":1,"type":"agent_turn_completed","provider":"claude","sessionId":"thread-1","turnState":"needs_input","finalText":"日志在哪？","finalTextSource":"provider_message"}` + "\n")},
@@ -1030,6 +1030,18 @@ func TestRunsControllerPromptAttachPersistsNeedsInput(t *testing.T) {
 	}
 	if stored.Status != domain.ProjectRunStatusWaitingForInput || !stored.CompletedAt.IsZero() {
 		t.Fatalf("stored run = %#v, want nonterminal waiting_for_input", stored)
+	}
+	if runtime.interaction == nil || len(runtime.interaction.sent) == 0 {
+		t.Fatalf("runtime start frame was not sent: %#v", runtime.interaction)
+	}
+	var startFrame struct {
+		InteractionProtocol string `json:"interactionProtocol"`
+	}
+	if err := json.Unmarshal(runtime.interaction.sent[0].Data, &startFrame); err != nil {
+		t.Fatalf("decode runtime start frame: %v", err)
+	}
+	if startFrame.InteractionProtocol != "agent-compose.v1" {
+		t.Fatalf("runtime start interactionProtocol = %q, want agent-compose.v1; turnState was not negotiated to reach the projector", startFrame.InteractionProtocol)
 	}
 	if len(configDB.events) != 4 || configDB.events[0].Kind != domain.ProjectRunEventKindUserMessage || configDB.events[1].Kind != domain.ProjectRunEventKindStatus || configDB.events[2].Kind != domain.ProjectRunEventKindAgentMessage || configDB.events[2].Text != "日志在哪？" || configDB.events[3].Kind != domain.ProjectRunEventKindStatus {
 		t.Fatalf("prompt attach events = %#v, want user/running-status/agent/waiting-status", configDB.events)
@@ -1104,6 +1116,9 @@ func TestRunsControllerPromptAttachResumesRunningForNextHumanMessage(t *testing.
 	}
 	if len(configDB.events) != 8 || configDB.events[0].Kind != domain.ProjectRunEventKindUserMessage || configDB.events[1].Kind != domain.ProjectRunEventKindStatus || configDB.events[2].Kind != domain.ProjectRunEventKindAgentMessage || configDB.events[3].Kind != domain.ProjectRunEventKindStatus || configDB.events[4].Kind != domain.ProjectRunEventKindUserMessage || configDB.events[5].Kind != domain.ProjectRunEventKindStatus || configDB.events[6].Kind != domain.ProjectRunEventKindAgentMessage || configDB.events[7].Kind != domain.ProjectRunEventKindStatus {
 		t.Fatalf("prompt attach events = %#v, want user/status/agent/status for both turns", configDB.events)
+	}
+	if configDB.events[1].ID == configDB.events[5].ID {
+		t.Fatalf("resume status events share ID %q, so a durable event store would collapse the second reply", configDB.events[1].ID)
 	}
 }
 
