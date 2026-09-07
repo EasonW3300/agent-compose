@@ -47,7 +47,20 @@ func TestConversationSurvivesObserverDisconnectAndResumes(t *testing.T) {
 	if resumed.Status != domain.ProjectRunStatusRunning {
 		t.Fatalf("reply run status = %q, want running", resumed.Status)
 	}
+	assertConversationStatus(t, store, run.RunID, domain.ProjectRunStatusRunning)
 	assertPromptRuntimeFrame(t, receiveRuntimeInputFrame(t, interaction.sent), "human_message", "/workspace/log.md")
+	duplicate, err := manager.Reply(ctx, run.RunID, "/workspace/log.md", "message-1")
+	if err != nil {
+		t.Fatalf("duplicate reply after resume: %v", err)
+	}
+	if duplicate.Status != domain.ProjectRunStatusRunning {
+		t.Fatalf("duplicate reply run status = %q, want running", duplicate.Status)
+	}
+	select {
+	case frame := <-interaction.sent:
+		t.Fatalf("duplicate reply sent runtime frame %#v", frame)
+	default:
+	}
 
 	interaction.frames <- promptRuntimeStdoutFrame(`{"v":1,"seq":2,"type":"agent_turn_completed","provider":"codex","turnState":"completed","finalText":"已整理","finalTextSource":"provider_message"}`)
 	interaction.frames <- driverpkg.RuntimeOutputFrame{Type: driverpkg.RuntimeOutputResult, Result: &driverpkg.RuntimeResult{OperationID: run.RunID, Success: true}}
@@ -241,4 +254,19 @@ func (s *synchronizedConversationStore) AppendProjectRunEvents(ctx context.Conte
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.fakeControllerStore.AppendProjectRunEvents(ctx, events)
+}
+
+func (s *synchronizedConversationStore) ListProjectRunEvents(_ context.Context, runID string, afterSequence uint64, limit int) ([]domain.ProjectRunEventRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items := make([]domain.ProjectRunEventRecord, 0)
+	for _, event := range s.fakeControllerStore.events {
+		if event.RunID == runID && event.Sequence > afterSequence {
+			items = append(items, event)
+		}
+	}
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
 }

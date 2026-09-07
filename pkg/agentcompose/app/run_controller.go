@@ -134,6 +134,28 @@ func (d runControllerDelegate) StartAgentRun(ctx context.Context, req *connect.R
 	}), nil
 }
 
+func (d runControllerDelegate) StartInteractiveAgentRun(ctx context.Context, req *connect.Request[agentcomposev2.StartAgentRunRequest]) (*connect.Response[agentcomposev2.StartAgentRunResponse], error) {
+	if d.supervisor == nil {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("run supervisor is required"))
+	}
+	run, err := d.supervisor.StartInteractiveRun(ctx, runAgentRequestFromProto(req.Msg.GetRun()))
+	if err != nil {
+		return nil, runConnectError(err)
+	}
+	return connect.NewResponse(&agentcomposev2.StartAgentRunResponse{Run: api.ProjectRunSummaryToProto(run), Warnings: append([]string(nil), run.Warnings...), Started: !runs.StatusIsTerminal(run.Status)}), nil
+}
+
+func (d runControllerDelegate) SendRunHumanMessage(ctx context.Context, req *connect.Request[agentcomposev2.SendRunHumanMessageRequest]) (*connect.Response[agentcomposev2.SendRunHumanMessageResponse], error) {
+	if d.supervisor == nil {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("run supervisor is required"))
+	}
+	run, err := d.supervisor.SendRunHumanMessage(ctx, req.Msg.GetRunId(), req.Msg.GetText(), req.Msg.GetClientMessageId())
+	if err != nil {
+		return nil, runConnectError(err)
+	}
+	return connect.NewResponse(&agentcomposev2.SendRunHumanMessageResponse{Run: api.ProjectRunSummaryToProto(run)}), nil
+}
+
 func (d runControllerDelegate) StreamAgentRun(ctx context.Context, req *connect.Request[agentcomposev2.RunAgentRequest], stream *connect.ServerStream[agentcomposev2.StreamAgentRunResponse]) error {
 	api.PrepareStreamingHeaders(stream.ResponseHeader())
 	sink := runs.StreamSink{

@@ -2,6 +2,7 @@ package runs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -30,6 +31,12 @@ type ConversationManagerDeps struct {
 // interaction work uses Controller's narrower Store contract.
 type conversationRunLister interface {
 	ListProjectRunsByOptions(context.Context, domain.ProjectRunListOptions) ([]domain.ProjectRunRecord, error)
+}
+
+// conversationMessageLookup reads durable user events so reconnect retries can
+// be acknowledged after the first reply has already advanced the run state.
+type conversationMessageLookup interface {
+	ListProjectRunEvents(context.Context, string, uint64, int) ([]domain.ProjectRunEventRecord, error)
 }
 
 // ConversationManager holds live prompt interactions independently of an HTTP
@@ -168,7 +175,15 @@ func (m *ConversationManager) Reply(_ context.Context, runID, text, clientMessag
 		return domain.ProjectRunRecord{}, err
 	}
 	if run.Status != domain.ProjectRunStatusWaitingForInput {
-		return run, fmt.Errorf("conversation %s cannot accept a reply while %s", runID, run.Status)
+		// The client message is committed before the state transition to RUNNING.
+		// Check its durable record first so retrying a timed-out HTTP response is
+		// idempotent while genuinely new messages still fail precondition.
+		if duplicate, lookupErr := m.hasHumanMessageClientID(conversation.context, runID, clientMessageID); lookupErr != nil {
+			return domain.ProjectRunRecord{}, lookupErr
+		} else if duplicate {
+			return run, nil
+		}
+		return run, domain.ResourceError(domain.ErrFailedPrecondition, "conversation", runID, fmt.Sprintf("conversation %s cannot accept a reply while %s", runID, run.Status), nil)
 	}
 	created, err := conversation.session.Projector.AppendHumanMessageFrameIfNew(text, clientMessageID)
 	if err != nil {
@@ -194,6 +209,46 @@ func (m *ConversationManager) Reply(_ context.Context, runID, text, clientMessag
 		return run, err
 	}
 	return run, nil
+}
+
+func (m *ConversationManager) hasHumanMessageClientID(ctx context.Context, runID, clientMessageID string) (bool, error) {
+	clientMessageID = strings.TrimSpace(clientMessageID)
+	if clientMessageID == "" {
+		return false, nil
+	}
+	lookup, ok := m.store.(conversationMessageLookup)
+	if !ok {
+		return false, nil
+	}
+	for after := uint64(0); ; {
+		events, err := lookup.ListProjectRunEvents(context.WithoutCancel(ctx), runID, after, 200)
+		if err != nil {
+			return false, fmt.Errorf("list conversation messages: %w", err)
+		}
+		if len(events) == 0 {
+			return false, nil
+		}
+		for _, event := range events {
+			if event.Sequence > after {
+				after = event.Sequence
+			}
+			if event.Kind != domain.ProjectRunEventKindUserMessage || strings.TrimSpace(event.PayloadJSON) == "" {
+				continue
+			}
+			var payload struct {
+				ClientMessageID string `json:"client_message_id"`
+			}
+			if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+				continue
+			}
+			if strings.TrimSpace(payload.ClientMessageID) == clientMessageID {
+				return true, nil
+			}
+		}
+		if len(events) < 200 {
+			return false, nil
+		}
+	}
 }
 
 // Stop cancels an active conversation and records a canceled terminal state.
@@ -380,7 +435,7 @@ func (m *ConversationManager) loadConversationReplyRun(runID, reason string) (do
 	if err != nil {
 		return domain.ProjectRunRecord{}, err
 	}
-	return run, fmt.Errorf("conversation %s cannot accept a reply: %s", runID, reason)
+	return run, domain.ResourceError(domain.ErrFailedPrecondition, "conversation", runID, fmt.Sprintf("conversation %s cannot accept a reply: %s", runID, reason), nil)
 }
 
 func (m *ConversationManager) unregisterConversation(conversation *managedConversation) {

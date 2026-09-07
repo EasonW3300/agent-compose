@@ -228,6 +228,16 @@ func (e *RunExecutor) Execute(ctx context.Context, prepared PreparedRun) (domain
 			Level:       "warn",
 			Message:     run.Error,
 		})
+	} else if errors.Is(execErr, ErrActiveConversation) {
+		run.Status = domain.SchedulerRunStatusSkipped
+		run.Error = "active conversation"
+		_ = e.writeArtifact(run.ArtifactsDir, "error.txt", run.Error)
+		_ = e.deps.Store.UpdateSchedulerLastError(writeCtx, prepared.Scheduler.Summary.ID, run.Error)
+		_ = e.addSchedulerEvent(writeCtx, schedulerRunEventInput{
+			SchedulerID: prepared.Scheduler.Summary.ID, RunID: run.ID, TriggerID: run.TriggerID,
+			EventType: "scheduler.skipped_active_conversation", Level: "warn", Message: run.Error,
+			Payload: map[string]any{"reason": "active_conversation"},
+		})
 	} else if execErr != nil {
 		run.Status = domain.SchedulerRunStatusFailed
 		run.Error = execErr.Error()

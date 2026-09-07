@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -70,6 +71,24 @@ func (s *RunSupervisor) StartRun(ctx context.Context, req runs.RunAgentRequest) 
 		_, _, _ = started.Execute(execCtx, nil)
 	}()
 	return started.Run, nil
+}
+
+// StartInteractiveRun gives the daemon-owned conversation manager control of
+// the runtime stream, keeping the session alive after the unary request ends.
+func (s *RunSupervisor) StartInteractiveRun(ctx context.Context, req runs.RunAgentRequest) (domain.ProjectRunRecord, error) {
+	if s == nil || s.conversations == nil {
+		return domain.ProjectRunRecord{}, fmt.Errorf("conversation manager is required")
+	}
+	return s.conversations.Start(ctx, req)
+}
+
+// SendRunHumanMessage resumes a durable prompt turn without giving the HTTP
+// connection ownership of the runtime interaction.
+func (s *RunSupervisor) SendRunHumanMessage(ctx context.Context, runID, text, clientMessageID string) (domain.ProjectRunRecord, error) {
+	if s == nil || s.conversations == nil {
+		return domain.ProjectRunRecord{}, fmt.Errorf("conversation manager is required")
+	}
+	return s.conversations.Reply(ctx, runID, text, clientMessageID)
 }
 
 func (s *RunSupervisor) Run(ctx context.Context, req runs.RunAgentRequest, stream *runs.StreamSink) (domain.ProjectRunRecord, error, error) {

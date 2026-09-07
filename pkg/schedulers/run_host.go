@@ -2,6 +2,7 @@ package schedulers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -11,6 +12,10 @@ import (
 	"agent-compose/pkg/execution"
 	domain "agent-compose/pkg/model"
 )
+
+// ErrActiveConversation signals that a scheduler must skip rather than create
+// another sandbox while the same project agent awaits a human reply.
+var ErrActiveConversation = errors.New("active conversation")
 
 type HostStore interface {
 	CreateEvent(ctx context.Context, event domain.TopicEventRecord) (domain.TopicEventRecord, error)
@@ -98,6 +103,7 @@ type RunHostDependencies struct {
 	AgentExecutor           HostAgentExecutor
 	CommandExecutor         HostCommandExecutor
 	ProjectAgentRunner      HostProjectAgentRunner
+	ProjectRuns             HostProjectRunLister
 	LLM                     HostLLMRunner
 	SandboxRPC              HostSandboxRPC
 	Publisher               HostPublisher

@@ -23,6 +23,8 @@ import (
 type RunAgentDelegate interface {
 	RunAgent(context.Context, *connect.Request[agentcomposev2.RunAgentRequest]) (*connect.Response[agentcomposev2.RunAgentResponse], error)
 	StartAgentRun(context.Context, *connect.Request[agentcomposev2.StartAgentRunRequest]) (*connect.Response[agentcomposev2.StartAgentRunResponse], error)
+	StartInteractiveAgentRun(context.Context, *connect.Request[agentcomposev2.StartAgentRunRequest]) (*connect.Response[agentcomposev2.StartAgentRunResponse], error)
+	SendRunHumanMessage(context.Context, *connect.Request[agentcomposev2.SendRunHumanMessageRequest]) (*connect.Response[agentcomposev2.SendRunHumanMessageResponse], error)
 	StreamAgentRun(context.Context, *connect.Request[agentcomposev2.RunAgentRequest], *connect.ServerStream[agentcomposev2.StreamAgentRunResponse]) error
 	AttachAgentRun(context.Context, *connect.BidiStream[agentcomposev2.AttachAgentRunRequest, agentcomposev2.AttachAgentRunResponse]) error
 }
@@ -83,6 +85,33 @@ func (h *RunHandler) StartAgentRun(ctx context.Context, req *connect.Request[age
 		return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("start run is not configured"))
 	}
 	return h.delegate.StartAgentRun(ctx, req)
+}
+
+func (h *RunHandler) StartInteractiveAgentRun(ctx context.Context, req *connect.Request[agentcomposev2.StartAgentRunRequest]) (*connect.Response[agentcomposev2.StartAgentRunResponse], error) {
+	if h.delegate == nil {
+		return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("interactive run is not configured"))
+	}
+	response, err := h.delegate.StartInteractiveAgentRun(ctx, req)
+	if err != nil {
+		return nil, ConnectErrorForDomain(err)
+	}
+	return response, nil
+}
+
+func (h *RunHandler) SendRunHumanMessage(ctx context.Context, req *connect.Request[agentcomposev2.SendRunHumanMessageRequest]) (*connect.Response[agentcomposev2.SendRunHumanMessageResponse], error) {
+	if h.delegate == nil {
+		return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("interactive run is not configured"))
+	}
+	// Reject blank replies at the transport boundary so an empty frame can never
+	// advance a durable conversation or consume a client message ID.
+	if strings.TrimSpace(req.Msg.GetText()) == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("human message text is required"))
+	}
+	response, err := h.delegate.SendRunHumanMessage(ctx, req)
+	if err != nil {
+		return nil, ConnectErrorForDomain(err)
+	}
+	return response, nil
 }
 
 func (h *RunHandler) StreamAgentRun(ctx context.Context, req *connect.Request[agentcomposev2.RunAgentRequest], stream *connect.ServerStream[agentcomposev2.StreamAgentRunResponse]) error {

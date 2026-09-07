@@ -63,6 +63,7 @@ func NewSchedulerController(di do.Injector) (*schedulers.Controller, error) {
 				AgentExecutor:           adapters.SchedulerHostAgentExecutor{Executor: do.MustInvoke[*adapters.AgentExecutor](di)},
 				CommandExecutor:         adapters.SchedulerHostCommandExecutor{Executor: do.MustInvoke[*adapters.SchedulerCommandExecutor](di)},
 				ProjectAgentRunner:      schedulerProjectAgentRunner{controller: do.MustInvoke[*runs.Controller](di)},
+				ProjectRuns:             configDB,
 				LLM:                     adapters.SchedulerHostLLMRunner{Client: do.MustInvoke[*adapters.LLMClient](di)},
 				SandboxRPC:              do.MustInvoke[*adapters.SandboxRPCBridge](di),
 				Publisher:               controller,

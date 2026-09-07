@@ -29,6 +29,12 @@ type HostProjectAgentRunner interface {
 	RunProjectAgent(ctx context.Context, request HostProjectAgentRequest) (domain.ProjectRunRecord, error, error)
 }
 
+// HostProjectRunLister narrows scheduler reads to the project-run query needed
+// to prevent a scheduled prompt from competing with an active conversation.
+type HostProjectRunLister interface {
+	ListProjectRunsByOptions(context.Context, domain.ProjectRunListOptions) ([]domain.ProjectRunRecord, error)
+}
+
 func (h *RuntimeHost) ProjectAgent(ctx context.Context, prompt string, request domain.SchedulerAgentRequest) (domain.SchedulerAgentResult, error) {
 	sandboxPolicy := domain.SchedulerSandboxPolicyNew
 	if strings.TrimSpace(h.scheduler.Summary.SandboxPolicy) != "" {
@@ -40,6 +46,18 @@ func (h *RuntimeHost) ProjectAgent(ctx context.Context, prompt string, request d
 	configHash, err := SchedulerSandboxConfigHash(h.scheduler)
 	if err != nil {
 		return domain.SchedulerAgentResult{}, err
+	}
+	// Check before calling ProjectAgentRunner: that call owns workspace and
+	// sandbox preparation, which must not run while a user-facing prompt waits.
+	if active, err := h.hasActiveConversation(ctx); err != nil {
+		return domain.SchedulerAgentResult{}, err
+	} else if active {
+		_ = h.addSchedulerEvent(ctx, SchedulerEventInput{
+			EventType: "scheduler.skipped_active_conversation", Level: "warn",
+			Message: "scheduler skipped because the project agent is waiting for input",
+			Payload: map[string]any{"reason": "active_conversation"},
+		})
+		return domain.SchedulerAgentResult{}, ErrActiveConversation
 	}
 	run, execErr, err := h.deps.ProjectAgentRunner.RunProjectAgent(ctx, HostProjectAgentRequest{
 		SchedulerID:        h.scheduler.Summary.ID,
@@ -83,6 +101,26 @@ func (h *RuntimeHost) ProjectAgent(ctx context.Context, prompt string, request d
 		return result, execErr
 	}
 	return result, nil
+}
+
+func (h *RuntimeHost) hasActiveConversation(ctx context.Context) (bool, error) {
+	if h.deps.ProjectRuns == nil {
+		return false, nil
+	}
+	for _, status := range []string{domain.ProjectRunStatusRunning, domain.ProjectRunStatusWaitingForInput} {
+		items, err := h.deps.ProjectRuns.ListProjectRunsByOptions(ctx, domain.ProjectRunListOptions{
+			ProjectID: h.scheduler.Summary.ProjectID, AgentName: h.scheduler.Summary.AgentName, Status: status, Limit: 1,
+		})
+		if err != nil {
+			return false, fmt.Errorf("list active project conversations: %w", err)
+		}
+		for _, run := range items {
+			if strings.TrimSpace(run.Prompt) != "" {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func (h *RuntimeHost) nextProjectAgentRunID() string {
