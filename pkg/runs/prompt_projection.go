@@ -285,6 +285,36 @@ func (p *promptAttachProjector) AppendHumanMessageFrame(message, clientMessageID
 	return err
 }
 
+// AppendHumanMessageFrameIfNew persists a daemon-owned reply before it enters
+// the runtime. A repeated client message ID returns false, so a reconnecting
+// client cannot send a duplicate human frame after the durable event store has
+// already accepted the first attempt.
+func (p *promptAttachProjector) AppendHumanMessageFrameIfNew(message, clientMessageID string) (bool, error) {
+	text := promptAttachHumanLogText(message)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.events != nil && strings.TrimSpace(message) != "" {
+		p.humanIndex++
+		_, created, err := p.events.AppendProjectRunEvent(p.eventContext(), domain.ProjectRunEventRecord{
+			ID: attachedHumanEventID(p.run.RunID, clientMessageID, uint64(p.humanIndex), message), RunID: p.run.RunID, Kind: domain.ProjectRunEventKindUserMessage, Text: message, Agent: p.run.AgentName,
+			PayloadJSON: projectRunUserMessagePayload(clientMessageID),
+		})
+		if err != nil || !created {
+			return created, err
+		}
+	}
+	p.persistedAssistantTurn = false
+	if text != "" {
+		if p.hasLoggedText && !p.logEndsWithNewline {
+			text = "\n" + text
+		}
+		if err := p.appendLogChunkLocked(domain.ExecChunk{Text: text}); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
 func (p *promptAttachProjector) AppendStderr(text string) error {
 	if text == "" {
 		return nil

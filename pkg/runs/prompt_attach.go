@@ -17,6 +17,9 @@ import (
 	domain "agent-compose/pkg/model"
 )
 
+// driverpkg supplies the long-lived stdin/stdout interaction that carries the
+// framed runtime protocol; execution builds the command which hosts it.
+
 // preparedPromptInteraction is the resolved agent/runtime state
 // preparePromptInteractionRuntime hands back to runPromptInteraction once
 // dependencies are validated and the run's prompt/schema artifacts are
@@ -118,6 +121,52 @@ func (c *Controller) runPromptInteraction(ctx context.Context, runCtx interactio
 }
 
 func (c *Controller) runPromptInteractionSession(ctx context.Context, runCtx interactionRunContext, prepared preparedPromptInteraction, receive RunAttachReceiver, send RunAttachSender) (TransitionRequest, error) {
+	session, err := c.openPromptInteractionSession(ctx, runCtx, prepared)
+	if err != nil {
+		return TransitionRequest{RunID: prepared.Run.RunID, SandboxID: runCtx.Sandbox.Summary.ID, LogsPath: prepared.LogsPath, ExitCode: 1, Error: fmt.Sprintf("agent execution failed: %v", err)}, err
+	}
+	defer func() { _ = session.Interaction.CloseSend() }()
+	inputCtx, cancelInput := context.WithCancel(ctx)
+	defer cancelInput()
+	onHumanMessage := func(message, clientMessageID string) error {
+		if err := session.Projector.AppendHumanMessageFrame(message, clientMessageID); err != nil {
+			return err
+		}
+		if runCtx.Coordinator == nil {
+			return fmt.Errorf("prompt resume transition requires coordinator")
+		}
+		// The message event retains its own idempotency boundary. The companion
+		// state transition records that this persisted reply has resumed work.
+		_, err := runCtx.Coordinator.MarkRunning(context.WithoutCancel(ctx), session.Run.RunID, session.Sandbox.Summary.ID)
+		return err
+	}
+	go pumpRunPromptAttachInput(inputCtx, receive, promptInputPump{Input: session.Input, TurnReady: session.TurnReady, OnHumanMessage: onHumanMessage})
+	return receivePromptInteractionFrames(ctx, session.Run, session.Sandbox, session.Transition, promptInteractionReceiveState{
+		Interaction: session.Interaction,
+		Projector:   session.Projector,
+		Coordinator: runCtx.Coordinator,
+		TurnReady:   session.TurnReady,
+	}, send)
+}
+
+// promptInteractionSession owns one initialized runtime stream. It is shared
+// by the traditional attach path and the daemon-owned conversation manager so
+// both negotiate and project exactly the same wire protocol.
+type promptInteractionSession struct {
+	Run          domain.ProjectRunRecord
+	Sandbox      *domain.Sandbox
+	Transition   TransitionRequest
+	Interaction  driverpkg.RuntimeInteraction
+	Projector    *promptAttachProjector
+	Input        *promptWrapperInput
+	TurnReady    chan struct{}
+	ManagedToken string
+}
+
+// openPromptInteractionSession opens the runtime stream and sends its initial
+// protocol frames. Its caller owns closing the interaction input when the
+// runtime ends, which lets detached conversations outlive HTTP observers.
+func (c *Controller) openPromptInteractionSession(ctx context.Context, runCtx interactionRunContext, prepared preparedPromptInteraction) (promptInteractionSession, error) {
 	run := prepared.Run
 	sandbox := runCtx.Sandbox
 	logsPath := prepared.LogsPath
@@ -145,50 +194,28 @@ func (c *Controller) runPromptInteractionSession(ctx context.Context, runCtx int
 	}
 	interaction, err := prepared.InteractionRuntime.OpenInteraction(ctx, sandbox, prepared.VMState, spec)
 	if err != nil {
-		transition.ExitCode = 1
-		transition.Error = fmt.Sprintf("agent execution failed: %v", err)
-		return transition, err
+		return promptInteractionSession{}, err
 	}
 	interaction = driverpkg.GuardRuntimeInteractionInput(interaction)
-	defer func() { _ = interaction.CloseSend() }()
 	projector := newPersistentPromptAttachProjector(context.WithoutCancel(ctx), persistentPromptAttachProjectorDeps{Run: run, Sandbox: sandbox, LogsPath: logsPath, Hub: c.runLogs, EventStore: c.configDB})
 	input := &promptWrapperInput{interaction: interaction}
 	if err := input.Start(prepared.AgentConfig, c.config, prepared.SchemaPath); err != nil {
-		transition.ExitCode = 1
-		transition.Error = fmt.Sprintf("agent execution failed: %v", err)
-		return transition, err
+		_ = interaction.CloseSend()
+		return promptInteractionSession{}, err
 	}
-	inputCtx, cancelInput := context.WithCancel(ctx)
-	defer cancelInput()
 	turnReady := make(chan struct{}, 1)
 	if prompt := strings.TrimSpace(runCtx.Request.Prompt); prompt != "" {
 		if err := input.HumanMessage(prompt); err != nil {
-			transition.ExitCode = 1
-			transition.Error = fmt.Sprintf("agent execution failed: %v", err)
-			return transition, err
+			_ = interaction.CloseSend()
+			return promptInteractionSession{}, err
 		}
 	} else {
 		releasePromptTurn(turnReady)
 	}
-	onHumanMessage := func(message, clientMessageID string) error {
-		if err := projector.AppendHumanMessageFrame(message, clientMessageID); err != nil {
-			return err
-		}
-		if runCtx.Coordinator == nil {
-			return fmt.Errorf("prompt resume transition requires coordinator")
-		}
-		// The message event retains its own idempotency boundary. The companion
-		// state transition records that this persisted reply has resumed work.
-		_, err := runCtx.Coordinator.MarkRunning(context.WithoutCancel(ctx), run.RunID, sandbox.Summary.ID)
-		return err
-	}
-	go pumpRunPromptAttachInput(inputCtx, receive, promptInputPump{Input: input, TurnReady: turnReady, OnHumanMessage: onHumanMessage})
-	return receivePromptInteractionFrames(ctx, run, sandbox, transition, promptInteractionReceiveState{
-		Interaction: interaction,
-		Projector:   projector,
-		Coordinator: runCtx.Coordinator,
-		TurnReady:   turnReady,
-	}, send)
+	return promptInteractionSession{
+		Run: run, Sandbox: sandbox, Transition: transition, Interaction: interaction, Projector: projector, Input: input, TurnReady: turnReady,
+		ManagedToken: prepared.ManagedEnv["AGENT_COMPOSE_SANDBOX_TOKEN"],
+	}, nil
 }
 
 // promptInteractionReceiveState bundles the open interaction, log

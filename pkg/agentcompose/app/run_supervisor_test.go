@@ -10,6 +10,7 @@ import (
 	appconfig "agent-compose/pkg/config"
 	"agent-compose/pkg/internal/testutil"
 	domain "agent-compose/pkg/model"
+	"agent-compose/pkg/runs"
 	"agent-compose/pkg/storage/configstore"
 )
 
@@ -89,6 +90,41 @@ func TestRunSupervisorUnregisterRemovesStoppingRun(t *testing.T) {
 	supervisor.unregister("run-1")
 	if _, ok := supervisor.active["run-1"]; ok {
 		t.Fatalf("stopping run remained registered")
+	}
+}
+
+func TestNewRunSupervisorRecoversInterruptedConversations(t *testing.T) {
+	ctx := context.Background()
+	store := newRunSupervisorTestConfigStore(t)
+	if _, err := store.UpsertProject(ctx, domain.ProjectRecord{
+		ID: "project-1", Name: "project", SourcePath: "/tmp/project", SourceJSON: "{}",
+	}); err != nil {
+		t.Fatalf("UpsertProject returned error: %v", err)
+	}
+	agent, err := store.UpsertProjectAgent(ctx, domain.ProjectAgentRecord{ProjectID: "project-1", AgentName: "worker"})
+	if err != nil {
+		t.Fatalf("UpsertProjectAgent returned error: %v", err)
+	}
+	for _, status := range []string{domain.ProjectRunStatusRunning, domain.ProjectRunStatusWaitingForInput} {
+		if _, err := store.CreateProjectRun(ctx, domain.ProjectRunRecord{
+			RunID: "run-" + status, ProjectID: "project-1", ProjectName: "project", AgentName: "worker", AgentID: agent.ID,
+			Source: domain.ProjectRunSourceManual, Status: status, Prompt: "continue", CleanupPolicy: domain.ProjectRunCleanupKeepRunning, ResultJSON: "{}",
+		}); err != nil {
+			t.Fatalf("CreateProjectRun(%s) returned error: %v", status, err)
+		}
+	}
+	di := do.New()
+	do.ProvideValue(di, ctx)
+	do.ProvideValue(di, runs.NewController(runs.ControllerDependencies{ConfigDB: store}))
+	do.ProvideValue(di, store)
+	if _, err := NewRunSupervisor(di); err != nil {
+		t.Fatalf("NewRunSupervisor returned error: %v", err)
+	}
+	for _, runID := range []string{"run-running", "run-waiting_for_input"} {
+		run, err := store.GetProjectRun(ctx, runID)
+		if err != nil || run.Status != domain.ProjectRunStatusInterrupted {
+			t.Fatalf("recovered run %s = %#v err=%v, want interrupted", runID, run, err)
+		}
 	}
 }
 

@@ -14,9 +14,10 @@ import (
 )
 
 type RunSupervisor struct {
-	root       context.Context
-	controller *runs.Controller
-	store      *configstore.ConfigStore
+	root          context.Context
+	controller    *runs.Controller
+	store         *configstore.ConfigStore
+	conversations *runs.ConversationManager
 
 	mu     sync.Mutex
 	active map[string]*activeRun
@@ -32,11 +33,23 @@ type activeRun struct {
 }
 
 func NewRunSupervisor(di do.Injector) (*RunSupervisor, error) {
+	root := do.MustInvoke[context.Context](di)
+	controller := do.MustInvoke[*runs.Controller](di)
+	conversations := runs.NewConversationManager(runs.ConversationManagerDeps{
+		Root:       root,
+		Controller: controller,
+	})
+	// A live runtime stream cannot survive a daemon restart. Resolve durable
+	// prompt conversations before this supervisor can expose new reply handlers.
+	if err := conversations.RecoverInterrupted(root); err != nil {
+		return nil, err
+	}
 	return &RunSupervisor{
-		root:       do.MustInvoke[context.Context](di),
-		controller: do.MustInvoke[*runs.Controller](di),
-		store:      do.MustInvoke[*configstore.ConfigStore](di),
-		active:     map[string]*activeRun{},
+		root:          root,
+		controller:    controller,
+		store:         do.MustInvoke[*configstore.ConfigStore](di),
+		conversations: conversations,
+		active:        map[string]*activeRun{},
 	}, nil
 }
 
@@ -95,6 +108,11 @@ func (s *RunSupervisor) Attach(ctx context.Context, receive runs.RunAttachReceiv
 func (s *RunSupervisor) Shutdown(ctx context.Context) error {
 	if s == nil {
 		return nil
+	}
+	// Stop detached prompt runtimes first. Their persisted state is retained so
+	// the next daemon startup can mark the interrupted conversations explicitly.
+	if err := s.conversations.Shutdown(ctx); err != nil {
+		return err
 	}
 	done := make(chan struct{})
 	go func() {
