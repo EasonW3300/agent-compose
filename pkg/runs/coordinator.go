@@ -14,6 +14,9 @@ import (
 	"github.com/google/uuid"
 )
 
+// domain provides durable run/event records, projects resolves immutable agent
+// definitions, and driverpkg validates the configured sandbox runtime.
+
 type StartRequest struct {
 	ProjectID       string
 	AgentName       string
@@ -28,17 +31,20 @@ type StartRequest struct {
 }
 
 type TransitionRequest struct {
-	RunID          string
-	Status         string
-	SandboxID      string
-	ExitCode       int
-	Error          string
-	ErrorStack     string
-	Output         string
-	ResultJSON     string
-	LogsPath       string
-	ArtifactsDir   string
-	CleanupError   string
+	RunID        string
+	Status       string
+	SandboxID    string
+	ExitCode     int
+	Error        string
+	ErrorStack   string
+	Output       string
+	ResultJSON   string
+	LogsPath     string
+	ArtifactsDir string
+	CleanupError string
+	// TerminalEvents are conversation records committed with this state update.
+	// Waiting transitions use the same batch so an agent message cannot outlive
+	// the status that explains why the turn paused.
 	TerminalEvents []domain.ProjectRunEventRecord
 }
 
@@ -227,7 +233,7 @@ func (c *Coordinator) TransitionRun(ctx context.Context, req TransitionRequest) 
 		if next.StartedAt.IsZero() {
 			next.StartedAt = now
 		}
-	case domain.ProjectRunStatusSucceeded, domain.ProjectRunStatusFailed, domain.ProjectRunStatusCanceled:
+	case domain.ProjectRunStatusSucceeded, domain.ProjectRunStatusFailed, domain.ProjectRunStatusCanceled, domain.ProjectRunStatusTimedOut, domain.ProjectRunStatusInterrupted:
 		if next.StartedAt.IsZero() {
 			next.StartedAt = now
 		}
@@ -237,15 +243,44 @@ func (c *Coordinator) TransitionRun(ctx context.Context, req TransitionRequest) 
 		next.DurationMs = max(0, next.CompletedAt.Sub(next.StartedAt).Milliseconds())
 	}
 	batch := make([]domain.ProjectRunEventRecord, 0, len(req.TerminalEvents)+1)
-	if StatusIsTerminal(next.Status) {
+	if projectRunTransitionNeedsStatusEvent(current.Status, next.Status) {
 		batch = append(batch, req.TerminalEvents...)
-		batch = append(batch, domain.ProjectRunEventRecord{ID: terminalStatusEventID(next.RunID), RunID: next.RunID, Kind: domain.ProjectRunEventKindStatus, PayloadJSON: next.ResultJSON, Success: next.Status == domain.ProjectRunStatusSucceeded, ExitCode: next.ExitCode, StopReason: next.Error})
+		batch = append(batch, projectRunTransitionStatusEvent(current, next, req.TerminalEvents))
 	}
 	updated, err := c.store.UpdateProjectRunWithEvents(ctx, next, batch)
 	if err != nil {
 		return domain.ProjectRunRecord{}, err
 	}
 	return updated, nil
+}
+
+func projectRunTransitionNeedsStatusEvent(from, to string) bool {
+	from = NormalizeStatus(from)
+	to = NormalizeStatus(to)
+	if from == to {
+		return false
+	}
+	// Startup remains intentionally event-free. Conversation state edges and
+	// terminal outcomes are user-visible lifecycle changes, so they always get
+	// a durable status record in the same transaction as their message events.
+	return from == domain.ProjectRunStatusWaitingForInput ||
+		to == domain.ProjectRunStatusWaitingForInput ||
+		StatusIsTerminal(to)
+}
+
+func projectRunTransitionStatusEvent(previous, next domain.ProjectRunRecord, events []domain.ProjectRunEventRecord) domain.ProjectRunEventRecord {
+	// Terminal status IDs stay stable for completion-journal retries. A
+	// nonterminal edge includes the accompanying event IDs, making retried
+	// client messages reuse their original status event as well.
+	eventID := terminalStatusEventID(next.RunID)
+	if !StatusIsTerminal(next.Status) {
+		eventID = transitionStatusEventID(next.RunID, previous.Status, next.Status, events)
+	}
+	return domain.ProjectRunEventRecord{
+		ID: eventID, RunID: next.RunID, Kind: domain.ProjectRunEventKindStatus,
+		PayloadJSON: next.ResultJSON, Success: next.Status == domain.ProjectRunStatusSucceeded,
+		ExitCode: next.ExitCode, StopReason: next.Error,
+	}
 }
 
 func (c *Coordinator) nowUTC() time.Time {
@@ -297,12 +332,17 @@ func validateProjectRunTransition(from, to string) error {
 	switch from {
 	case domain.ProjectRunStatusPending:
 		switch to {
-		case domain.ProjectRunStatusRunning, domain.ProjectRunStatusFailed, domain.ProjectRunStatusCanceled:
+		case domain.ProjectRunStatusRunning, domain.ProjectRunStatusFailed, domain.ProjectRunStatusCanceled, domain.ProjectRunStatusTimedOut, domain.ProjectRunStatusInterrupted:
 			return nil
 		}
 	case domain.ProjectRunStatusRunning:
 		switch to {
-		case domain.ProjectRunStatusSucceeded, domain.ProjectRunStatusFailed, domain.ProjectRunStatusCanceled:
+		case domain.ProjectRunStatusSucceeded, domain.ProjectRunStatusFailed, domain.ProjectRunStatusCanceled, domain.ProjectRunStatusWaitingForInput, domain.ProjectRunStatusTimedOut, domain.ProjectRunStatusInterrupted:
+			return nil
+		}
+	case domain.ProjectRunStatusWaitingForInput:
+		switch to {
+		case domain.ProjectRunStatusRunning, domain.ProjectRunStatusSucceeded, domain.ProjectRunStatusFailed, domain.ProjectRunStatusCanceled, domain.ProjectRunStatusTimedOut, domain.ProjectRunStatusInterrupted:
 			return nil
 		}
 	}
@@ -311,7 +351,7 @@ func validateProjectRunTransition(from, to string) error {
 
 func StatusIsTerminal(status string) bool {
 	switch NormalizeStatus(status) {
-	case domain.ProjectRunStatusSucceeded, domain.ProjectRunStatusFailed, domain.ProjectRunStatusCanceled:
+	case domain.ProjectRunStatusSucceeded, domain.ProjectRunStatusFailed, domain.ProjectRunStatusCanceled, domain.ProjectRunStatusTimedOut, domain.ProjectRunStatusInterrupted:
 		return true
 	default:
 		return false

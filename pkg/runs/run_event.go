@@ -1,11 +1,15 @@
 package runs
 
 import (
+	domain "agent-compose/pkg/model"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"strings"
 )
+
+// domain supplies the event records whose stable IDs make retried lifecycle
+// transitions safe to append through the durable event store.
 
 type runEventIdentityKind byte
 
@@ -20,6 +24,7 @@ const (
 	runEventIdentityAttachedAgent  runEventIdentityKind = 3
 	runEventIdentityTerminalAgent  runEventIdentityKind = 4
 	runEventIdentityTerminalStatus runEventIdentityKind = 5
+	runEventIdentityTransition     runEventIdentityKind = 6
 )
 
 func initialPromptEventID(runID string) string {
@@ -48,6 +53,15 @@ func terminalAgentEventID(runID string) string {
 
 func terminalStatusEventID(runID string) string {
 	return stableRunEventID(runID, runEventIdentityTerminalStatus, nil)
+}
+
+func transitionStatusEventID(runID, from, to string, events []domain.ProjectRunEventRecord) string {
+	parts := make([][]byte, 0, len(events)+2)
+	parts = append(parts, []byte(from), []byte(to))
+	for _, event := range events {
+		parts = append(parts, []byte(event.ID))
+	}
+	return stableRunEventID(runID, runEventIdentityTransition, identityToken(attachedEventExplicitToken, parts...))
 }
 
 func stableRunEventID(runID string, kind runEventIdentityKind, token []byte) string {

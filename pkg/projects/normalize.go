@@ -10,6 +10,9 @@ import (
 	domain "agent-compose/pkg/model"
 )
 
+// domain provides persisted project records and the complete status vocabulary
+// that normalization must preserve at this storage-facing boundary.
+
 func NormalizeRecord(project domain.ProjectRecord) (domain.ProjectRecord, error) {
 	project.ID = strings.TrimSpace(project.ID)
 	project.Name = strings.TrimSpace(project.Name)
@@ -182,6 +185,12 @@ func NormalizeRunStatus(status string) string {
 		return domain.ProjectRunStatusFailed
 	case domain.ProjectRunStatusCanceled:
 		return domain.ProjectRunStatusCanceled
+	case domain.ProjectRunStatusWaitingForInput:
+		return domain.ProjectRunStatusWaitingForInput
+	case domain.ProjectRunStatusTimedOut:
+		return domain.ProjectRunStatusTimedOut
+	case domain.ProjectRunStatusInterrupted:
+		return domain.ProjectRunStatusInterrupted
 	default:
 		return domain.ProjectRunStatusPending
 	}
@@ -196,7 +205,7 @@ func NormalizeRunStatusFilter(statuses []string) []string {
 			continue
 		}
 		switch status {
-		case domain.ProjectRunStatusPending, domain.ProjectRunStatusRunning, domain.ProjectRunStatusSucceeded, domain.ProjectRunStatusFailed, domain.ProjectRunStatusCanceled:
+		case domain.ProjectRunStatusPending, domain.ProjectRunStatusRunning, domain.ProjectRunStatusSucceeded, domain.ProjectRunStatusFailed, domain.ProjectRunStatusCanceled, domain.ProjectRunStatusWaitingForInput, domain.ProjectRunStatusTimedOut, domain.ProjectRunStatusInterrupted:
 		default:
 			continue
 		}

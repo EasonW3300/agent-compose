@@ -3,11 +3,15 @@ package runs
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 
 	domain "agent-compose/pkg/model"
 )
+
+// json decodes runtime frames and encodes durable client-message metadata;
+// domain supplies the run/event records projected from those untrusted frames.
 
 type promptAttachProjector struct {
 	run                    domain.ProjectRunRecord
@@ -95,6 +99,7 @@ func (p *promptAttachProjector) projectLine(line []byte) ([]RunAttachOutput, *Tr
 		Message         string                      `json:"message"`
 		Provider        string                      `json:"provider"`
 		Seq             uint64                      `json:"seq"`
+		TurnState       string                      `json:"turnState"`
 	}
 	if err := json.Unmarshal(line, &frame); err != nil {
 		return nil, nil, err
@@ -112,7 +117,13 @@ func (p *promptAttachProjector) projectLine(line []byte) ([]RunAttachOutput, *Tr
 		if err := p.appendLogFinalText(frame.FinalText); err != nil {
 			return nil, nil, err
 		}
-		if err := p.appendAssistantEvent(line, frame.Seq, agentTurnProjection{FinalText: frame.FinalText, FinalTextSource: frame.FinalTextSource, Provider: frame.Provider, StopReason: frame.StopReason}); err != nil {
+		turn := agentTurnProjection{FinalText: frame.FinalText, FinalTextSource: frame.FinalTextSource, Provider: frame.Provider, StopReason: frame.StopReason}
+		if transition, hasTurnState, err := p.transitionFromTurnState(line, frame.Seq, frame.TurnState, turn); err != nil {
+			return nil, nil, err
+		} else if hasTurnState {
+			return []RunAttachOutput{runAttachAgentTurnCompletedResponse(p.run, string(line), warningsFromRun(p.run))}, transition, nil
+		}
+		if err := p.appendAssistantEvent(line, frame.Seq, turn); err != nil {
 			return nil, nil, err
 		}
 		return []RunAttachOutput{runAttachAgentTurnCompletedResponse(p.run, string(line), warningsFromRun(p.run))}, nil, nil
@@ -129,6 +140,28 @@ func (p *promptAttachProjector) projectLine(line []byte) ([]RunAttachOutput, *Tr
 		return []RunAttachOutput{runAttachErrorResponse(firstNonEmpty(frame.Code, "runtime_stream_error"), message, true)}, &transition, nil
 	default:
 		return []RunAttachOutput{runAttachAgentEventResponse(firstNonEmpty(frame.Type, "agent_event"), "", string(line))}, nil, nil
+	}
+}
+
+func (p *promptAttachProjector) transitionFromTurnState(line []byte, sequence uint64, turnState string, turn agentTurnProjection) (*TransitionRequest, bool, error) {
+	switch strings.TrimSpace(turnState) {
+	case "":
+		return nil, false, nil
+	case "needs_input", "completed":
+		transition := transitionFromPromptWrapperResult(p.run, p.sandbox, promptWrapperOutcome{
+			LogsPath: p.logsPath, Payload: line, FinalText: turn.FinalText, StopReason: turn.StopReason,
+		})
+		// Keep the assistant message in the coordinator's transaction with the
+		// state event, rather than committing a visible question independently.
+		transition.TerminalEvents = p.turnEvents(line, sequence, turn)
+		if strings.TrimSpace(turnState) == "needs_input" {
+			transition.Status = domain.ProjectRunStatusWaitingForInput
+		} else {
+			transition.Status = domain.ProjectRunStatusSucceeded
+		}
+		return &transition, true, nil
+	default:
+		return nil, false, fmt.Errorf("unsupported interactive turn state %q", turnState)
 	}
 }
 
@@ -228,7 +261,7 @@ func (p *promptAttachProjector) AppendHumanMessage(message string) error {
 	return p.AppendHumanMessageFrame(message, "")
 }
 
-func (p *promptAttachProjector) AppendHumanMessageFrame(message, clientFrameID string) error {
+func (p *promptAttachProjector) AppendHumanMessageFrame(message, clientMessageID string) error {
 	text := promptAttachHumanLogText(message)
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -246,7 +279,8 @@ func (p *promptAttachProjector) AppendHumanMessageFrame(message, clientFrameID s
 	}
 	p.humanIndex++
 	_, _, err := p.events.AppendProjectRunEvent(p.eventContext(), domain.ProjectRunEventRecord{
-		ID: attachedHumanEventID(p.run.RunID, clientFrameID, uint64(p.humanIndex), message), RunID: p.run.RunID, Kind: domain.ProjectRunEventKindUserMessage, Text: message, Agent: p.run.AgentName,
+		ID: attachedHumanEventID(p.run.RunID, clientMessageID, uint64(p.humanIndex), message), RunID: p.run.RunID, Kind: domain.ProjectRunEventKindUserMessage, Text: message, Agent: p.run.AgentName,
+		PayloadJSON: projectRunUserMessagePayload(clientMessageID),
 	})
 	return err
 }
@@ -283,6 +317,16 @@ func (p *promptAttachProjector) appendAssistantEvent(line []byte, seq uint64, tu
 	p.turnText = ""
 	p.persistedAssistantTurn = len(events) > 0
 	return nil
+}
+
+func (p *promptAttachProjector) turnEvents(line []byte, sequence uint64, turn agentTurnProjection) []domain.ProjectRunEventRecord {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	turn.Transcript = p.turnText
+	events := attachedAgentTurnEvents(p.run, sequence, line, turn)
+	p.turnText = ""
+	p.persistedAssistantTurn = len(events) > 0
+	return events
 }
 
 func (p *promptAttachProjector) terminalTurnEvents(turn agentTurnProjection) []domain.ProjectRunEventRecord {
@@ -325,6 +369,20 @@ func promptAttachHumanLogText(message string) string {
 		return message
 	}
 	return message + "\n"
+}
+
+func projectRunUserMessagePayload(clientMessageID string) string {
+	clientMessageID = strings.TrimSpace(clientMessageID)
+	if clientMessageID == "" {
+		return ""
+	}
+	payload, err := json.Marshal(struct {
+		ClientMessageID string `json:"client_message_id"`
+	}{ClientMessageID: clientMessageID})
+	if err != nil {
+		return ""
+	}
+	return string(payload)
 }
 
 func bytesIndexByte(data []byte, needle byte) int {

@@ -3,6 +3,7 @@ package configstore
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +11,9 @@ import (
 
 	domain "agent-compose/pkg/model"
 )
+
+// json reads the structured client-message metadata embedded in durable user
+// events; domain supplies the records appended by this SQLite transaction.
 
 func (s *projectStore) AppendProjectRunEvent(ctx context.Context, event domain.ProjectRunEventRecord) (domain.ProjectRunEventRecord, bool, error) {
 	items, created, err := s.AppendProjectRunEvents(ctx, []domain.ProjectRunEventRecord{event})
@@ -51,6 +55,19 @@ func appendProjectRunEventsTx(ctx context.Context, tx *sql.Tx, events []domain.P
 		if event.CreatedAt.IsZero() {
 			event.CreatedAt = time.Now().UTC()
 		}
+		if clientMessageID := projectRunUserMessageClientMessageID(event); clientMessageID != "" {
+			// Resolve a retry inside the same write transaction before allocating a
+			// sequence, so distinct event IDs cannot duplicate one client message.
+			existing, found, findErr := findProjectRunUserMessageByClientMessageID(ctx, tx, event.RunID, clientMessageID)
+			if findErr != nil {
+				return nil, nil, findErr
+			}
+			if found {
+				results = append(results, existing)
+				created = append(created, false)
+				continue
+			}
+		}
 		err := tx.QueryRowContext(ctx, `INSERT INTO project_run_event (id, run_id, seq, kind, text, agent, name, payload_json, success, exit_code, stop_reason, created_at)
 			SELECT ?, ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM project_run_event WHERE run_id = ?
 			RETURNING seq`, event.ID, event.RunID, string(event.Kind), event.Text, event.Agent, event.Name, event.PayloadJSON, BoolToInt(event.Success), event.ExitCode, event.StopReason, event.CreatedAt.UTC().UnixMilli(), event.RunID).Scan(&event.Sequence)
@@ -67,6 +84,41 @@ func appendProjectRunEventsTx(ctx context.Context, tx *sql.Tx, events []domain.P
 		created = append(created, true)
 	}
 	return results, created, nil
+}
+
+func projectRunUserMessageClientMessageID(event domain.ProjectRunEventRecord) string {
+	if event.Kind != domain.ProjectRunEventKindUserMessage || strings.TrimSpace(event.PayloadJSON) == "" {
+		return ""
+	}
+	var payload struct {
+		ClientMessageID string `json:"client_message_id"`
+	}
+	if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.ClientMessageID)
+}
+
+func findProjectRunUserMessageByClientMessageID(ctx context.Context, tx *sql.Tx, runID, clientMessageID string) (domain.ProjectRunEventRecord, bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id, run_id, seq, kind, text, agent, name, payload_json, success, exit_code, stop_reason, created_at
+		FROM project_run_event WHERE run_id = ? AND kind = ? ORDER BY seq ASC`, runID, domain.ProjectRunEventKindUserMessage)
+	if err != nil {
+		return domain.ProjectRunEventRecord{}, false, fmt.Errorf("query user messages for client message id: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		event, scanErr := scanRunEvent(rows.Scan)
+		if scanErr != nil {
+			return domain.ProjectRunEventRecord{}, false, scanErr
+		}
+		if projectRunUserMessageClientMessageID(event) == clientMessageID {
+			return event, true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return domain.ProjectRunEventRecord{}, false, fmt.Errorf("iterate user messages for client message id: %w", err)
+	}
+	return domain.ProjectRunEventRecord{}, false, nil
 }
 
 func (s *projectStore) ListProjectRunEvents(ctx context.Context, runID string, afterSequence uint64, limit int) ([]domain.ProjectRunEventRecord, error) {
