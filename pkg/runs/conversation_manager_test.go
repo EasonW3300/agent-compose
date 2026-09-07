@@ -2,6 +2,8 @@ package runs
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -116,6 +118,48 @@ func TestConversationRecoveryMarksNonterminalRunsInterrupted(t *testing.T) {
 	}
 }
 
+func TestConversationRecoveryCollectsEveryPageBeforeChangingStatuses(t *testing.T) {
+	const conversationsPerStatus = 201
+	runs := map[string]domain.ProjectRunRecord{
+		"running-command": {RunID: "running-command", Status: domain.ProjectRunStatusRunning, CleanupPolicy: domain.ProjectRunCleanupKeepRunning},
+		"waiting-command": {RunID: "waiting-command", Status: domain.ProjectRunStatusWaitingForInput, CleanupPolicy: domain.ProjectRunCleanupKeepRunning},
+		"terminal":        {RunID: "terminal", Status: domain.ProjectRunStatusSucceeded, Prompt: "already finished", CleanupPolicy: domain.ProjectRunCleanupKeepRunning},
+	}
+	for _, status := range []string{domain.ProjectRunStatusRunning, domain.ProjectRunStatusWaitingForInput} {
+		for index := 0; index < conversationsPerStatus; index++ {
+			runID := fmt.Sprintf("%s-prompt-%03d", status, index)
+			runs[runID] = domain.ProjectRunRecord{
+				RunID: runID, Status: status, Prompt: "continue", CleanupPolicy: domain.ProjectRunCleanupKeepRunning,
+			}
+		}
+	}
+	store := &conversationRecoveryStore{fakeControllerStore: &fakeControllerStore{runs: runs}}
+	manager := NewConversationManager(ConversationManagerDeps{Controller: &Controller{configDB: store}})
+
+	if err := manager.RecoverInterrupted(context.Background()); err != nil {
+		t.Fatalf("recover interrupted conversations: %v", err)
+	}
+	for _, status := range []string{domain.ProjectRunStatusRunning, domain.ProjectRunStatusWaitingForInput} {
+		for index := 0; index < conversationsPerStatus; index++ {
+			runID := fmt.Sprintf("%s-prompt-%03d", status, index)
+			run, err := store.GetProjectRun(context.Background(), runID)
+			if err != nil || run.Status != domain.ProjectRunStatusInterrupted {
+				t.Fatalf("recovered run %s = %#v err=%v, want interrupted", runID, run, err)
+			}
+		}
+	}
+	for _, runID := range []string{"running-command", "waiting-command"} {
+		run, err := store.GetProjectRun(context.Background(), runID)
+		if err != nil || run.Status == domain.ProjectRunStatusInterrupted {
+			t.Fatalf("command run %s = %#v err=%v, want original nonterminal status", runID, run, err)
+		}
+	}
+	terminal, err := store.GetProjectRun(context.Background(), "terminal")
+	if err != nil || terminal.Status != domain.ProjectRunStatusSucceeded {
+		t.Fatalf("terminal run = %#v err=%v, want unchanged succeeded", terminal, err)
+	}
+}
+
 type conversationRecoveryStore struct {
 	*fakeControllerStore
 }
@@ -127,7 +171,18 @@ func (s *conversationRecoveryStore) ListProjectRunsByOptions(_ context.Context, 
 			items = append(items, run)
 		}
 	}
-	return items, nil
+	sort.Slice(items, func(left, right int) bool {
+		return items[left].RunID < items[right].RunID
+	})
+	offset := options.Offset
+	if offset >= len(items) {
+		return nil, nil
+	}
+	limit := options.Limit
+	if limit <= 0 || offset+limit > len(items) {
+		limit = len(items) - offset
+	}
+	return items[offset : offset+limit], nil
 }
 
 // synchronizedConversationStore keeps the existing reusable controller fake

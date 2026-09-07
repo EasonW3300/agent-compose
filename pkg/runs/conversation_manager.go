@@ -220,26 +220,32 @@ func (m *ConversationManager) RecoverInterrupted(ctx context.Context) error {
 		return nil
 	}
 	for _, status := range []string{domain.ProjectRunStatusRunning, domain.ProjectRunStatusWaitingForInput} {
-		for offset := 0; ; offset += 200 {
+		var candidates []domain.ProjectRunRecord
+		// Collect every status-filtered page before changing any run. Each
+		// interruption removes that run from this query, so writing during offset
+		// pagination would shift later records and leave conversations unrecovered.
+		for offset := 0; ; {
 			items, err := m.lister.ListProjectRunsByOptions(ctx, domain.ProjectRunListOptions{Status: status, Limit: 200, Offset: offset})
 			if err != nil {
 				return fmt.Errorf("list %s conversations for recovery: %w", status, err)
 			}
-			for _, run := range items {
-				// A persisted prompt identifies the runtime stream as a human-turn
-				// conversation. Running command runs are recovered by their existing
-				// supervisor path and must not be relabeled here.
-				if StatusIsTerminal(run.Status) || strings.TrimSpace(run.Prompt) == "" {
-					continue
-				}
-				if _, err := m.controller.completeProjectRun(context.WithoutCancel(ctx), TransitionRequest{
-					RunID: run.RunID, Status: domain.ProjectRunStatusInterrupted, SandboxID: run.SandboxID, Error: "conversation interrupted by daemon restart",
-				}); err != nil {
-					return fmt.Errorf("mark conversation %s interrupted: %w", run.RunID, err)
-				}
-			}
-			if len(items) < 200 {
+			if len(items) == 0 {
 				break
+			}
+			candidates = append(candidates, items...)
+			offset += len(items)
+		}
+		for _, run := range candidates {
+			// A persisted prompt identifies the runtime stream as a human-turn
+			// conversation. Running command runs are recovered by their existing
+			// supervisor path and must not be relabeled here.
+			if StatusIsTerminal(run.Status) || strings.TrimSpace(run.Prompt) == "" {
+				continue
+			}
+			if _, err := m.controller.completeProjectRun(context.WithoutCancel(ctx), TransitionRequest{
+				RunID: run.RunID, Status: domain.ProjectRunStatusInterrupted, SandboxID: run.SandboxID, Error: "conversation interrupted by daemon restart",
+			}); err != nil {
+				return fmt.Errorf("mark conversation %s interrupted: %w", run.RunID, err)
 			}
 		}
 	}
