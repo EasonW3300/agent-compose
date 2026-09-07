@@ -18,16 +18,17 @@ import (
 // definitions, and driverpkg validates the configured sandbox runtime.
 
 type StartRequest struct {
-	ProjectID       string
-	AgentName       string
-	Source          string
-	SchedulerID     string
-	SchedulerRunID  string
-	TriggerID       string
-	Prompt          string
-	Driver          string
-	CleanupPolicy   string
-	ClientRequestID string
+	ProjectID               string
+	AgentName               string
+	Source                  string
+	SchedulerID             string
+	SchedulerRunID          string
+	TriggerID               string
+	Prompt                  string
+	Driver                  string
+	CleanupPolicy           string
+	ClientRequestID         string
+	InteractiveConversation bool
 }
 
 type TransitionRequest struct {
@@ -144,22 +145,23 @@ func (c *Coordinator) BeginRun(ctx context.Context, req StartRequest) (domain.Pr
 		return domain.ProjectRunRecord{}, err
 	}
 	run := domain.ProjectRunRecord{
-		RunID:           runID,
-		ProjectID:       project.ID,
-		ProjectName:     project.Name,
-		ProjectRevision: project.CurrentRevision,
-		AgentName:       projectAgent.AgentName,
-		AgentID:         agent.ID,
-		Source:          req.Source,
-		SchedulerID:     req.SchedulerID,
-		SchedulerRunID:  req.SchedulerRunID,
-		TriggerID:       req.TriggerID,
-		Status:          domain.ProjectRunStatusPending,
-		Prompt:          req.Prompt,
-		Driver:          driver,
-		ImageRef:        firstNonEmpty(agent.GuestImage, projectAgent.Image),
-		CleanupPolicy:   NormalizeCleanupPolicy(req.CleanupPolicy),
-		ResultJSON:      "{}",
+		RunID:                   runID,
+		ProjectID:               project.ID,
+		ProjectName:             project.Name,
+		ProjectRevision:         project.CurrentRevision,
+		AgentName:               projectAgent.AgentName,
+		AgentID:                 agent.ID,
+		Source:                  req.Source,
+		SchedulerID:             req.SchedulerID,
+		SchedulerRunID:          req.SchedulerRunID,
+		TriggerID:               req.TriggerID,
+		Status:                  domain.ProjectRunStatusPending,
+		Prompt:                  req.Prompt,
+		Driver:                  driver,
+		ImageRef:                firstNonEmpty(agent.GuestImage, projectAgent.Image),
+		CleanupPolicy:           NormalizeCleanupPolicy(req.CleanupPolicy),
+		InteractiveConversation: req.InteractiveConversation,
+		ResultJSON:              "{}",
 	}
 	var initialEvents []domain.ProjectRunEventRecord
 	if strings.TrimSpace(run.Prompt) != "" {

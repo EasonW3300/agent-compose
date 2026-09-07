@@ -116,7 +116,9 @@ func (m *ConversationManager) Start(ctx context.Context, req RunAgentRequest) (d
 		}
 	}()
 
-	started, err := m.controller.StartProjectRun(ctx, req)
+	// Persist the interaction mode in the initial transaction so schedulers
+	// never mistake an ordinary single-turn prompt for a live conversation.
+	started, err := m.controller.startInteractiveProjectRun(ctx, req)
 	if err != nil {
 		return domain.ProjectRunRecord{}, err
 	}
@@ -166,7 +168,7 @@ func (m *ConversationManager) Reply(_ context.Context, runID, text, clientMessag
 	conversation := m.conversations[runID]
 	m.mu.Unlock()
 	if conversation == nil {
-		return m.loadConversationReplyRun(runID, "conversation is not active")
+		return m.loadConversationReplyRun(runID, clientMessageID, "conversation is not active")
 	}
 	conversation.replyMu.Lock()
 	defer conversation.replyMu.Unlock()
@@ -294,7 +296,7 @@ func (m *ConversationManager) RecoverInterrupted(ctx context.Context) error {
 			// A persisted prompt identifies the runtime stream as a human-turn
 			// conversation. Running command runs are recovered by their existing
 			// supervisor path and must not be relabeled here.
-			if StatusIsTerminal(run.Status) || strings.TrimSpace(run.Prompt) == "" {
+			if StatusIsTerminal(run.Status) || !run.InteractiveConversation {
 				continue
 			}
 			if _, err := m.controller.completeProjectRun(context.WithoutCancel(ctx), TransitionRequest{
@@ -430,10 +432,17 @@ func (m *ConversationManager) terminateConversation(conversation *managedConvers
 	})
 }
 
-func (m *ConversationManager) loadConversationReplyRun(runID, reason string) (domain.ProjectRunRecord, error) {
+func (m *ConversationManager) loadConversationReplyRun(runID, clientMessageID, reason string) (domain.ProjectRunRecord, error) {
 	run, err := m.store.GetProjectRun(context.WithoutCancel(m.root), runID)
 	if err != nil {
 		return domain.ProjectRunRecord{}, err
+	}
+	// The in-memory owner may have unregistered after completion, but the user
+	// message event is durable. Return that original run for retrying clients.
+	if duplicate, lookupErr := m.hasHumanMessageClientID(m.root, runID, clientMessageID); lookupErr != nil {
+		return domain.ProjectRunRecord{}, lookupErr
+	} else if duplicate {
+		return run, nil
 	}
 	return run, domain.ResourceError(domain.ErrFailedPrecondition, "conversation", runID, fmt.Sprintf("conversation %s cannot accept a reply: %s", runID, reason), nil)
 }

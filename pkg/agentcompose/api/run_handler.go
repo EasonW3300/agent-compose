@@ -91,11 +91,7 @@ func (h *RunHandler) StartInteractiveAgentRun(ctx context.Context, req *connect.
 	if h.delegate == nil {
 		return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("interactive run is not configured"))
 	}
-	response, err := h.delegate.StartInteractiveAgentRun(ctx, req)
-	if err != nil {
-		return nil, ConnectErrorForDomain(err)
-	}
-	return response, nil
+	return h.delegate.StartInteractiveAgentRun(ctx, req)
 }
 
 func (h *RunHandler) SendRunHumanMessage(ctx context.Context, req *connect.Request[agentcomposev2.SendRunHumanMessageRequest]) (*connect.Response[agentcomposev2.SendRunHumanMessageResponse], error) {
@@ -107,11 +103,7 @@ func (h *RunHandler) SendRunHumanMessage(ctx context.Context, req *connect.Reque
 	if strings.TrimSpace(req.Msg.GetText()) == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("human message text is required"))
 	}
-	response, err := h.delegate.SendRunHumanMessage(ctx, req)
-	if err != nil {
-		return nil, ConnectErrorForDomain(err)
-	}
-	return response, nil
+	return h.delegate.SendRunHumanMessage(ctx, req)
 }
 
 func (h *RunHandler) StreamAgentRun(ctx context.Context, req *connect.Request[agentcomposev2.RunAgentRequest], stream *connect.ServerStream[agentcomposev2.StreamAgentRunResponse]) error {

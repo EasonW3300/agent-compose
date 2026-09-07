@@ -27,6 +27,40 @@ func TestSendRunHumanMessageRejectsNonWaitingRun(t *testing.T) {
 	}
 }
 
+func TestConversationHandlerPreservesDelegateErrorCodes(t *testing.T) {
+	ctx := context.Background()
+	store := newRunSupervisorTestConfigStore(t)
+	if _, err := store.UpsertProject(ctx, domain.ProjectRecord{ID: "project-1", Name: "project", SourcePath: "/tmp/project", SourceJSON: "{}"}); err != nil {
+		t.Fatalf("UpsertProject: %v", err)
+	}
+	agent, err := store.UpsertProjectAgent(ctx, domain.ProjectAgentRecord{ProjectID: "project-1", AgentName: "worker"})
+	if err != nil {
+		t.Fatalf("UpsertProjectAgent: %v", err)
+	}
+	if _, err := store.CreateProjectRun(ctx, domain.ProjectRunRecord{RunID: "completed-conversation", ProjectID: "project-1", AgentName: "worker", AgentID: agent.ID, Prompt: "continue", InteractiveConversation: true, Status: domain.ProjectRunStatusSucceeded, ResultJSON: "{}"}); err != nil {
+		t.Fatalf("CreateProjectRun: %v", err)
+	}
+	controller := runs.NewController(runs.ControllerDependencies{ConfigDB: store})
+	supervisor := &RunSupervisor{root: ctx, controller: controller, store: store, conversations: runs.NewConversationManager(runs.ConversationManagerDeps{Root: ctx, Controller: controller})}
+	handler := api.NewRunHandler(runControllerDelegate{supervisor: supervisor}, store)
+
+	for _, test := range []struct {
+		name  string
+		runID string
+		want  connect.Code
+	}{
+		{name: "not found", runID: "missing-conversation", want: connect.CodeNotFound},
+		{name: "not waiting", runID: "completed-conversation", want: connect.CodeFailedPrecondition},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := handler.SendRunHumanMessage(ctx, connect.NewRequest(&agentcomposev2.SendRunHumanMessageRequest{RunId: test.runID, Text: "continue", ClientMessageId: "message-1"}))
+			if got := connect.CodeOf(err); got != test.want {
+				t.Fatalf("SendRunHumanMessage code = %s, want %s (error: %v)", got, test.want, err)
+			}
+		})
+	}
+}
+
 func TestSendRunHumanMessageRejectsEmptyText(t *testing.T) {
 	delegate := &conversationRunDelegateFake{}
 	handler := api.NewRunHandler(delegate, nil)

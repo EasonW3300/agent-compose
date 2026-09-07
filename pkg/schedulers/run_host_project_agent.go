@@ -115,7 +115,9 @@ func (h *RuntimeHost) hasActiveConversation(ctx context.Context) (bool, error) {
 			return false, fmt.Errorf("list active project conversations: %w", err)
 		}
 		for _, run := range items {
-			if strings.TrimSpace(run.Prompt) != "" {
+			// Only the durable interactive marker denotes a reply-capable stream.
+			// A normal single-turn prompt may be running concurrently with a schedule.
+			if run.InteractiveConversation {
 				return true, nil
 			}
 		}

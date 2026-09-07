@@ -42,3 +42,35 @@ func TestProjectRunEventsDeduplicateUserMessageClientMessageID(t *testing.T) {
 		t.Fatalf("stored message events = %#v, err=%v", events, err)
 	}
 }
+
+func TestProjectRunPersistsInteractiveConversationMarker(t *testing.T) {
+	ctx := context.Background()
+	store := FromDB(newMemoryDB(t))
+	if err := store.initSchema(ctx); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	project, err := store.UpsertProject(ctx, domain.ProjectRecord{ID: "project-interactive-marker", Name: "interactive-marker"})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	agentID := createRunEventTestAgent(t, runEventTestAgentSpec{Ctx: ctx, Store: store, ProjectID: project.ID, AgentName: "worker"})
+	created, err := store.CreateProjectRun(ctx, domain.ProjectRunRecord{RunID: "run-interactive-marker", ProjectID: project.ID, AgentName: "worker", AgentID: agentID, Status: domain.ProjectRunStatusPending, InteractiveConversation: true})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	if !created.InteractiveConversation {
+		t.Fatalf("created run lost interactive marker: %#v", created)
+	}
+	run, err := store.GetProjectRun(ctx, "run-interactive-marker")
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if !run.InteractiveConversation {
+		t.Fatalf("interactive marker was not scanned into run record: %#v", run)
+	}
+	run.InteractiveConversation = false
+	updated, err := store.UpdateProjectRun(ctx, run)
+	if err != nil || updated.InteractiveConversation {
+		t.Fatalf("update interactive marker = %#v, err=%v", updated, err)
+	}
+}

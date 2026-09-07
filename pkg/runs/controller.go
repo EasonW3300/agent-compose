@@ -219,6 +219,16 @@ type StartedProjectRun struct {
 }
 
 func (c *Controller) StartProjectRun(ctx context.Context, req RunAgentRequest) (StartedProjectRun, error) {
+	return c.startProjectRun(ctx, req, false)
+}
+
+// startInteractiveProjectRun is intentionally package-private so detached
+// conversations are the only run path that can persist the scheduler guard.
+func (c *Controller) startInteractiveProjectRun(ctx context.Context, req RunAgentRequest) (StartedProjectRun, error) {
+	return c.startProjectRun(ctx, req, true)
+}
+
+func (c *Controller) startProjectRun(ctx context.Context, req RunAgentRequest, interactiveConversation bool) (StartedProjectRun, error) {
 	if c.configDB == nil {
 		return StartedProjectRun{}, fmt.Errorf("config store is required")
 	}
@@ -242,16 +252,17 @@ func (c *Controller) StartProjectRun(ctx context.Context, req RunAgentRequest) (
 	warnings := resolved.Warnings
 	coordinator := NewCoordinator(c.configDB, projects.StableProjectRunID)
 	run, err := coordinator.BeginRun(ctx, StartRequest{
-		ProjectID:       req.ProjectID,
-		AgentName:       req.AgentName,
-		Source:          req.Source,
-		SchedulerID:     req.SchedulerID,
-		SchedulerRunID:  req.SchedulerRunID,
-		TriggerID:       req.TriggerID,
-		Prompt:          req.Prompt,
-		Driver:          req.Driver,
-		CleanupPolicy:   CleanupPolicyFromProto(req.CleanupPolicy),
-		ClientRequestID: req.ClientRequestID,
+		ProjectID:               req.ProjectID,
+		AgentName:               req.AgentName,
+		Source:                  req.Source,
+		SchedulerID:             req.SchedulerID,
+		SchedulerRunID:          req.SchedulerRunID,
+		TriggerID:               req.TriggerID,
+		Prompt:                  req.Prompt,
+		Driver:                  req.Driver,
+		CleanupPolicy:           CleanupPolicyFromProto(req.CleanupPolicy),
+		ClientRequestID:         req.ClientRequestID,
+		InteractiveConversation: interactiveConversation,
 	})
 	if err != nil {
 		return StartedProjectRun{}, fmt.Errorf("%w: %w", ErrInvalidRequest, err)

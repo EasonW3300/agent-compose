@@ -103,13 +103,14 @@ func ScanProjectRun(scan func(dest ...any) error) (domain.ProjectRunRecord, erro
 	var item domain.ProjectRunRecord
 	var schedulerRunID sql.NullString
 	var sandboxCreated int
+	var interactiveConversation int
 	var startedAtRaw any
 	var completedAtRaw any
 	var createdAtRaw any
 	var updatedAtRaw any
 	if err := scan(
 		&item.RunID, &item.ProjectID, &item.ProjectName, &item.ProjectRevision, &item.AgentName, &item.AgentID, &item.Source, &item.SchedulerID, &schedulerRunID, &item.TriggerID, &item.Status,
-		&item.SandboxID, &item.ExitCode, &item.Error, &item.ErrorStack, &item.Prompt, &item.Output, &item.ResultJSON, &item.LogsPath, &item.ArtifactsDir, &item.CleanupError, &item.CleanupPolicy, &sandboxCreated, &item.Driver, &item.ImageRef,
+		&item.SandboxID, &item.ExitCode, &item.Error, &item.ErrorStack, &item.Prompt, &item.Output, &item.ResultJSON, &item.LogsPath, &item.ArtifactsDir, &item.CleanupError, &item.CleanupPolicy, &sandboxCreated, &interactiveConversation, &item.Driver, &item.ImageRef,
 		&startedAtRaw, &completedAtRaw, &item.DurationMs, &createdAtRaw, &updatedAtRaw,
 	); err != nil {
 		return domain.ProjectRunRecord{}, fmt.Errorf("scan project run: %w", err)
@@ -117,6 +118,7 @@ func ScanProjectRun(scan func(dest ...any) error) (domain.ProjectRunRecord, erro
 	item.StartedAt = storedtime.ParseStoredUnixTimeAuto(AsInt64Time(startedAtRaw))
 	item.SchedulerRunID = schedulerRunID.String
 	item.SandboxCreated = sandboxCreated != 0
+	item.InteractiveConversation = interactiveConversation != 0
 	item.CompletedAt = storedtime.ParseStoredUnixTimeAuto(AsInt64Time(completedAtRaw))
 	item.CreatedAt = storedtime.ParseStoredTime(createdAtRaw)
 	item.UpdatedAt = storedtime.ParseStoredTime(updatedAtRaw)
@@ -174,6 +176,6 @@ func ParseInt64String(value string) (int64, bool) {
 
 func SelectProjectRunSQL() string {
 	return `SELECT run_id, project_id, project_name, project_revision, agent_name, agent_id, source, scheduler_id, scheduler_run_id, trigger_id, status,
-		sandbox_id, exit_code, error, error_stack, prompt, output, result_json, logs_path, artifacts_dir, cleanup_error, cleanup_policy, sandbox_created, driver, image_ref,
+		sandbox_id, exit_code, error, error_stack, prompt, output, result_json, logs_path, artifacts_dir, cleanup_error, cleanup_policy, sandbox_created, interactive_conversation, driver, image_ref,
 		started_at, completed_at, duration_ms, created_at, updated_at FROM project_run`
 }

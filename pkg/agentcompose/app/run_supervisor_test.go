@@ -108,7 +108,7 @@ func TestNewRunSupervisorRecoversInterruptedConversations(t *testing.T) {
 	for _, status := range []string{domain.ProjectRunStatusRunning, domain.ProjectRunStatusWaitingForInput} {
 		if _, err := store.CreateProjectRun(ctx, domain.ProjectRunRecord{
 			RunID: "run-" + status, ProjectID: "project-1", ProjectName: "project", AgentName: "worker", AgentID: agent.ID,
-			Source: domain.ProjectRunSourceManual, Status: status, Prompt: "continue", CleanupPolicy: domain.ProjectRunCleanupKeepRunning, ResultJSON: "{}",
+			Source: domain.ProjectRunSourceManual, Status: status, Prompt: "continue", InteractiveConversation: true, CleanupPolicy: domain.ProjectRunCleanupKeepRunning, ResultJSON: "{}",
 		}); err != nil {
 			t.Fatalf("CreateProjectRun(%s) returned error: %v", status, err)
 		}

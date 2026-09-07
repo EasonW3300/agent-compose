@@ -3,6 +3,7 @@ package runs
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sort"
 	"sync"
 	"testing"
@@ -27,6 +28,9 @@ func TestConversationSurvivesObserverDisconnectAndResumes(t *testing.T) {
 	run, err := manager.Start(ctx, RunAgentRequest{ProjectID: "project-1", AgentName: "worker", Prompt: "find the log"})
 	if err != nil {
 		t.Fatalf("start conversation: %v", err)
+	}
+	if !projectRunIsInteractiveConversation(run) {
+		t.Fatalf("interactive start stored run without the durable conversation marker: %#v", run)
 	}
 	assertPromptRuntimeFrame(t, receiveRuntimeInputFrame(t, interaction.sent), "start", "")
 	assertPromptRuntimeFrame(t, receiveRuntimeInputFrame(t, interaction.sent), "human_message", "find the log")
@@ -66,6 +70,76 @@ func TestConversationSurvivesObserverDisconnectAndResumes(t *testing.T) {
 	interaction.frames <- driverpkg.RuntimeOutputFrame{Type: driverpkg.RuntimeOutputResult, Result: &driverpkg.RuntimeResult{OperationID: run.RunID, Success: true}}
 	assertConversationStatus(t, store, run.RunID, domain.ProjectRunStatusSucceeded)
 	close(interaction.frames)
+}
+
+func TestConversationReplyRetryAfterCompletionReturnsDurableResult(t *testing.T) {
+	ctx := context.Background()
+	controller, store, runtime := newConversationManagerTestController(t)
+	interaction := newScriptedRunAttachInteraction()
+	runtime.interactionOverride = interaction
+	manager := NewConversationManager(ConversationManagerDeps{Root: ctx, Controller: controller})
+	t.Cleanup(func() {
+		if err := manager.Shutdown(context.Background()); err != nil {
+			t.Fatalf("shutdown manager: %v", err)
+		}
+	})
+
+	run, err := manager.Start(ctx, RunAgentRequest{ProjectID: "project-1", AgentName: "worker", Prompt: "find the log"})
+	if err != nil {
+		t.Fatalf("start conversation: %v", err)
+	}
+	_ = receiveRuntimeInputFrame(t, interaction.sent)
+	_ = receiveRuntimeInputFrame(t, interaction.sent)
+	interaction.frames <- driverpkg.RuntimeOutputFrame{Type: driverpkg.RuntimeOutputStarted}
+	interaction.frames <- promptRuntimeStdoutFrame(`{"v":1,"seq":1,"type":"agent_turn_completed","provider":"codex","turnState":"needs_input","finalText":"日志在哪？","finalTextSource":"provider_message"}`)
+	assertConversationStatus(t, store, run.RunID, domain.ProjectRunStatusWaitingForInput)
+
+	first, err := manager.Reply(ctx, run.RunID, "/workspace/log.md", "message-1")
+	if err != nil {
+		t.Fatalf("first reply: %v", err)
+	}
+	assertPromptRuntimeFrame(t, receiveRuntimeInputFrame(t, interaction.sent), "human_message", "/workspace/log.md")
+	interaction.frames <- promptRuntimeStdoutFrame(`{"v":1,"seq":2,"type":"agent_turn_completed","provider":"codex","turnState":"completed","finalText":"已整理","finalTextSource":"provider_message"}`)
+	interaction.frames <- driverpkg.RuntimeOutputFrame{Type: driverpkg.RuntimeOutputResult, Result: &driverpkg.RuntimeResult{OperationID: run.RunID, Success: true}}
+	assertConversationStatus(t, store, run.RunID, domain.ProjectRunStatusSucceeded)
+	waitForConversationUnregister(t, manager, run.RunID)
+
+	retry, err := manager.Reply(ctx, run.RunID, "/workspace/log.md", "message-1")
+	if err != nil {
+		t.Fatalf("retry after completion: %v", err)
+	}
+	if retry.RunID != first.RunID || retry.Status != domain.ProjectRunStatusSucceeded {
+		t.Fatalf("retry result = %#v, want completed original run %#v", retry, first)
+	}
+	select {
+	case frame := <-interaction.sent:
+		t.Fatalf("completed-conversation retry sent runtime frame %#v", frame)
+	default:
+	}
+	close(interaction.frames)
+}
+
+func projectRunIsInteractiveConversation(run domain.ProjectRunRecord) bool {
+	field := reflect.ValueOf(run).FieldByName("InteractiveConversation")
+	return field.IsValid() && field.Kind() == reflect.Bool && field.Bool()
+}
+
+func waitForConversationUnregister(t *testing.T, manager *ConversationManager, runID string) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		manager.mu.Lock()
+		_, active := manager.conversations[runID]
+		manager.mu.Unlock()
+		if !active {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("conversation %s remained registered after completion", runID)
+		case <-time.After(time.Millisecond):
+		}
+	}
 }
 
 func assertConversationStatus(t *testing.T, store interface {
@@ -111,8 +185,8 @@ func TestConversationTimeoutMarksRunTimedOut(t *testing.T) {
 
 func TestConversationRecoveryMarksNonterminalRunsInterrupted(t *testing.T) {
 	store := &conversationRecoveryStore{fakeControllerStore: &fakeControllerStore{runs: map[string]domain.ProjectRunRecord{
-		"running": {RunID: "running", Status: domain.ProjectRunStatusRunning, Prompt: "continue", CleanupPolicy: domain.ProjectRunCleanupKeepRunning},
-		"waiting": {RunID: "waiting", Status: domain.ProjectRunStatusWaitingForInput, Prompt: "continue", CleanupPolicy: domain.ProjectRunCleanupKeepRunning},
+		"running": {RunID: "running", Status: domain.ProjectRunStatusRunning, Prompt: "continue", InteractiveConversation: true, CleanupPolicy: domain.ProjectRunCleanupKeepRunning},
+		"waiting": {RunID: "waiting", Status: domain.ProjectRunStatusWaitingForInput, Prompt: "continue", InteractiveConversation: true, CleanupPolicy: domain.ProjectRunCleanupKeepRunning},
 		"command": {RunID: "command", Status: domain.ProjectRunStatusRunning, CleanupPolicy: domain.ProjectRunCleanupKeepRunning},
 	}}}
 	manager := NewConversationManager(ConversationManagerDeps{Controller: &Controller{configDB: store}})
@@ -136,13 +210,13 @@ func TestConversationRecoveryCollectsEveryPageBeforeChangingStatuses(t *testing.
 	runs := map[string]domain.ProjectRunRecord{
 		"running-command": {RunID: "running-command", Status: domain.ProjectRunStatusRunning, CleanupPolicy: domain.ProjectRunCleanupKeepRunning},
 		"waiting-command": {RunID: "waiting-command", Status: domain.ProjectRunStatusWaitingForInput, CleanupPolicy: domain.ProjectRunCleanupKeepRunning},
-		"terminal":        {RunID: "terminal", Status: domain.ProjectRunStatusSucceeded, Prompt: "already finished", CleanupPolicy: domain.ProjectRunCleanupKeepRunning},
+		"terminal":        {RunID: "terminal", Status: domain.ProjectRunStatusSucceeded, Prompt: "already finished", InteractiveConversation: true, CleanupPolicy: domain.ProjectRunCleanupKeepRunning},
 	}
 	for _, status := range []string{domain.ProjectRunStatusRunning, domain.ProjectRunStatusWaitingForInput} {
 		for index := 0; index < conversationsPerStatus; index++ {
 			runID := fmt.Sprintf("%s-prompt-%03d", status, index)
 			runs[runID] = domain.ProjectRunRecord{
-				RunID: runID, Status: status, Prompt: "continue", CleanupPolicy: domain.ProjectRunCleanupKeepRunning,
+				RunID: runID, Status: status, Prompt: "continue", InteractiveConversation: true, CleanupPolicy: domain.ProjectRunCleanupKeepRunning,
 			}
 		}
 	}
