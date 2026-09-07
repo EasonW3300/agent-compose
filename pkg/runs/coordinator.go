@@ -242,9 +242,12 @@ func (c *Coordinator) TransitionRun(ctx context.Context, req TransitionRequest) 
 		}
 		next.DurationMs = max(0, next.CompletedAt.Sub(next.StartedAt).Milliseconds())
 	}
+	// Message records must survive even when a provider repeats the same
+	// nonterminal state. A status record is appended only for an actual state
+	// change, so each lifecycle edge has exactly one durable status event.
 	batch := make([]domain.ProjectRunEventRecord, 0, len(req.TerminalEvents)+1)
+	batch = append(batch, req.TerminalEvents...)
 	if projectRunTransitionNeedsStatusEvent(current.Status, next.Status) {
-		batch = append(batch, req.TerminalEvents...)
 		batch = append(batch, projectRunTransitionStatusEvent(current, next, req.TerminalEvents))
 	}
 	updated, err := c.store.UpdateProjectRunWithEvents(ctx, next, batch)
@@ -260,12 +263,7 @@ func projectRunTransitionNeedsStatusEvent(from, to string) bool {
 	if from == to {
 		return false
 	}
-	// Startup remains intentionally event-free. Conversation state edges and
-	// terminal outcomes are user-visible lifecycle changes, so they always get
-	// a durable status record in the same transaction as their message events.
-	return from == domain.ProjectRunStatusWaitingForInput ||
-		to == domain.ProjectRunStatusWaitingForInput ||
-		StatusIsTerminal(to)
+	return true
 }
 
 func projectRunTransitionStatusEvent(previous, next domain.ProjectRunRecord, events []domain.ProjectRunEventRecord) domain.ProjectRunEventRecord {

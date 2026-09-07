@@ -79,6 +79,20 @@ func (c *Controller) executeStartedProjectRunAttach(ctx context.Context, attach 
 		_ = send(runAttachResultResponse(run, transition, false))
 		return run, execErr, nil
 	}
+	if transition.Status == domain.ProjectRunStatusWaitingForInput {
+		// The prompt receive loop has already committed this nonterminal turn
+		// through the coordinator. Do not turn a paused conversation into a
+		// successful completion merely because this attach stream has ended.
+		run, err = c.configDB.GetProjectRun(transitionCtx, transition.RunID)
+		if err != nil {
+			return domain.ProjectRunRecord{}, nil, err
+		}
+		run = withRunWarnings(run, warnings)
+		if err := send(runAttachResultResponse(run, transition, true)); err != nil {
+			return domain.ProjectRunRecord{}, nil, err
+		}
+		return run, nil, nil
+	}
 	transition.Status = domain.ProjectRunStatusSucceeded
 	run, err = c.completeProjectRun(transitionCtx, transition)
 	if err != nil {

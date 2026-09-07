@@ -80,7 +80,7 @@ func TestRunsCoordinatorAndHelperWorkflows(t *testing.T) {
 	if succeeded, err := coord.MarkSucceeded(ctx, TransitionRequest{RunID: run.RunID, ExitCode: 0, Output: "ok", ResultJSON: `{"ok":true}`, LogsPath: "/logs", ArtifactsDir: "/artifacts"}); err != nil || succeeded.Status != domain.ProjectRunStatusSucceeded || succeeded.DurationMs < 0 {
 		t.Fatalf("MarkSucceeded run=%#v err=%v", succeeded, err)
 	}
-	if len(store.events) != 2 || store.events[0].Kind != domain.ProjectRunEventKindUserMessage || store.events[1].Kind != domain.ProjectRunEventKindStatus {
+	if len(store.events) != 3 || store.events[0].Kind != domain.ProjectRunEventKindUserMessage || store.events[1].Kind != domain.ProjectRunEventKindStatus || store.events[2].Kind != domain.ProjectRunEventKindStatus {
 		t.Fatalf("coordinator inferred events from output: %#v", store.events)
 	}
 	if _, err := coord.MarkFailed(ctx, TransitionRequest{RunID: run.RunID, Error: "late"}); err == nil {
@@ -345,9 +345,10 @@ func TestRunsControllerRunProjectAgentSuccessWorkflow(t *testing.T) {
 	if run.Status != domain.ProjectRunStatusSucceeded || run.SandboxID == "" || !strings.Contains(run.Output, "curl https://weather.test") {
 		t.Fatalf("run = %#v", run)
 	}
-	if len(configDB.events) != 3 ||
-		configDB.events[1].Kind != domain.ProjectRunEventKindAgentMessage || configDB.events[1].Text != "Beijing is 26°C today." ||
-		strings.Contains(configDB.events[1].Text, "curl") || configDB.events[2].Kind != domain.ProjectRunEventKindStatus {
+	if len(configDB.events) != 4 ||
+		configDB.events[1].Kind != domain.ProjectRunEventKindStatus ||
+		configDB.events[2].Kind != domain.ProjectRunEventKindAgentMessage || configDB.events[2].Text != "Beijing is 26°C today." ||
+		strings.Contains(configDB.events[2].Text, "curl") || configDB.events[3].Kind != domain.ProjectRunEventKindStatus {
 		t.Fatalf("project run events = %#v", configDB.events)
 	}
 	if !strings.Contains(run.ArtifactsDir, filepath.Join("state", "cells", "cell-1")) || filepath.Base(run.LogsPath) != "output.txt" {
@@ -606,7 +607,7 @@ func TestRunsControllerRunProjectAgentCommandWorkflow(t *testing.T) {
 	if run.Status != domain.ProjectRunStatusSucceeded || run.Output != "command output\n" || run.ArtifactsDir == "" || run.LogsPath == "" {
 		t.Fatalf("command run = %#v", run)
 	}
-	if len(configDB.events) != 1 || configDB.events[0].Kind != domain.ProjectRunEventKindStatus {
+	if len(configDB.events) != 2 || configDB.events[0].Kind != domain.ProjectRunEventKindStatus || configDB.events[1].Kind != domain.ProjectRunEventKindStatus {
 		t.Fatalf("command run events = %#v", configDB.events)
 	}
 	if !strings.Contains(run.ArtifactsDir, filepath.Join("state", "runs", run.RunID)) || filepath.Base(run.LogsPath) != "transcript.txt" {
@@ -810,7 +811,7 @@ func TestRunsControllerRunProjectAgentCommandNonZeroExitPreservesOutput(t *testi
 	if run.Status != domain.ProjectRunStatusFailed || run.ExitCode != 7 || run.Output != "partial stdout\nfailure stderr\n" {
 		t.Fatalf("failed command run = %#v", run)
 	}
-	if len(configDB.events) != 1 || configDB.events[0].Kind != domain.ProjectRunEventKindStatus || configDB.events[0].Success {
+	if len(configDB.events) != 2 || configDB.events[0].Kind != domain.ProjectRunEventKindStatus || configDB.events[1].Kind != domain.ProjectRunEventKindStatus || configDB.events[1].Success {
 		t.Fatalf("failed command events = %#v", configDB.events)
 	}
 	if len(chunks) != 2 || domain.NormalizeStdioStream(chunks[0].Stream) != domain.StdioStdout || domain.NormalizeStdioStream(chunks[1].Stream) != domain.StdioStderr {
@@ -886,7 +887,7 @@ func TestRunsControllerRunProjectCommandAttachProjectsOutputAndResult(t *testing
 	if err != nil || string(data) != "hello\nwarn\n" {
 		t.Fatalf("attach transcript = %q err=%v", string(data), err)
 	}
-	if len(configDB.events) != 1 || configDB.events[0].Kind != domain.ProjectRunEventKindStatus {
+	if len(configDB.events) != 2 || configDB.events[0].Kind != domain.ProjectRunEventKindStatus || configDB.events[1].Kind != domain.ProjectRunEventKindStatus {
 		t.Fatalf("command attach events = %#v", configDB.events)
 	}
 }
@@ -990,8 +991,119 @@ func TestRunsControllerRunProjectPromptAttachProjectsAgentFrames(t *testing.T) {
 	if string(transcript) != "hello agent\n" {
 		t.Fatalf("prompt attach transcript = %q", string(transcript))
 	}
-	if len(configDB.events) != 3 || configDB.events[0].Kind != domain.ProjectRunEventKindUserMessage || configDB.events[1].Kind != domain.ProjectRunEventKindAgentMessage || configDB.events[1].Text != "hello agent" || configDB.events[2].Kind != domain.ProjectRunEventKindStatus {
+	if len(configDB.events) != 4 || configDB.events[0].Kind != domain.ProjectRunEventKindUserMessage || configDB.events[1].Kind != domain.ProjectRunEventKindStatus || configDB.events[2].Kind != domain.ProjectRunEventKindAgentMessage || configDB.events[2].Text != "hello agent" || configDB.events[3].Kind != domain.ProjectRunEventKindStatus {
 		t.Fatalf("prompt attach events = %#v", configDB.events)
+	}
+}
+
+func TestRunsControllerPromptAttachPersistsNeedsInput(t *testing.T) {
+	ctx := context.Background()
+	controller, configDB, _ := newTestRunAttachController(t, []driverpkg.RuntimeOutputFrame{
+		{Type: driverpkg.RuntimeOutputStarted},
+		{Type: driverpkg.RuntimeOutputStdout, Data: []byte(`{"v":1,"seq":0,"type":"started","provider":"claude","sessionId":"thread-1"}` + "\n")},
+		{Type: driverpkg.RuntimeOutputStdout, Data: []byte(`{"v":1,"seq":1,"type":"agent_turn_completed","provider":"claude","sessionId":"thread-1","turnState":"needs_input","finalText":"日志在哪？","finalTextSource":"provider_message"}` + "\n")},
+		{Type: driverpkg.RuntimeOutputResult, Result: &driverpkg.RuntimeResult{OperationID: "run-attach", ExitCode: 0, Success: true}},
+	})
+	configDB.revision.SpecJSON = `{"agents":[{"name":"worker","provider":"claude"}]}`
+	requests := []*agentcomposev2.AttachAgentRunRequest{{
+		Frame: &agentcomposev2.AttachAgentRunRequest_Start{Start: &agentcomposev2.AttachAgentRunStart{
+			Request: &agentcomposev2.RunAgentRequest{ProjectId: "project-1", AgentName: "worker", Prompt: "hello"},
+			Mode:    agentcomposev2.AttachRunMode_ATTACH_RUN_MODE_PROMPT,
+		}},
+	}}
+	var result *agentcomposev2.AttachResult
+	err := controller.RunProjectCommandAttach(ctx, recvAttachAgentRunRequests(requests), func(output RunAttachOutput) error {
+		if response := runAttachOutputToTestProto(output); response.GetResult() != nil {
+			result = response.GetResult()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RunProjectCommandAttach returned error: %v", err)
+	}
+	if result == nil || result.GetRun() == nil {
+		t.Fatalf("prompt attach result = %#v, want waiting run result", result)
+	}
+	stored, err := configDB.GetProjectRun(ctx, result.GetRun().GetRunId())
+	if err != nil {
+		t.Fatalf("get stored run: %v", err)
+	}
+	if stored.Status != domain.ProjectRunStatusWaitingForInput || !stored.CompletedAt.IsZero() {
+		t.Fatalf("stored run = %#v, want nonterminal waiting_for_input", stored)
+	}
+	if len(configDB.events) != 4 || configDB.events[0].Kind != domain.ProjectRunEventKindUserMessage || configDB.events[1].Kind != domain.ProjectRunEventKindStatus || configDB.events[2].Kind != domain.ProjectRunEventKindAgentMessage || configDB.events[2].Text != "日志在哪？" || configDB.events[3].Kind != domain.ProjectRunEventKindStatus {
+		t.Fatalf("prompt attach events = %#v, want user/running-status/agent/waiting-status", configDB.events)
+	}
+}
+
+func TestRunsControllerPromptAttachResumesRunningForNextHumanMessage(t *testing.T) {
+	ctx := context.Background()
+	controller, configDB, runtime := newTestRunAttachController(t, nil)
+	interaction := newScriptedRunAttachInteraction()
+	runtime.interactionOverride = interaction
+
+	requests := make(chan RunAttachInput, 3)
+	requests <- RunAttachInput{Kind: RunAttachInputStart, Mode: RunAttachModePrompt, Request: RunAgentRequest{
+		ProjectID: "project-1", AgentName: "worker", Prompt: "human-1",
+	}}
+	requests <- RunAttachInput{Kind: RunAttachInputHumanMessage, Text: "human-2", ClientFrameID: "reply-1"}
+	requests <- RunAttachInput{Kind: RunAttachInputStdinEOF}
+	close(requests)
+
+	startedRunID := make(chan string, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- controller.RunProjectCommandAttach(ctx, func() (RunAttachInput, error) {
+			req, ok := <-requests
+			if !ok {
+				return RunAttachInput{}, io.EOF
+			}
+			return req, nil
+		}, func(output RunAttachOutput) error {
+			if output.Kind == RunAttachOutputStarted {
+				startedRunID <- output.Run.RunID
+			}
+			return nil
+		})
+	}()
+
+	assertPromptRuntimeFrame(t, receiveRuntimeInputFrame(t, interaction.sent), "start", "")
+	assertPromptRuntimeFrame(t, receiveRuntimeInputFrame(t, interaction.sent), "human_message", "human-1")
+	interaction.frames <- driverpkg.RuntimeOutputFrame{Type: driverpkg.RuntimeOutputStarted}
+	runID := <-startedRunID
+	interaction.frames <- promptRuntimeStdoutFrame(`{"v":1,"seq":0,"type":"started","provider":"codex","sessionId":"thread-1"}`)
+	interaction.frames <- promptRuntimeStdoutFrame(`{"v":1,"seq":1,"type":"agent_turn_completed","provider":"codex","sessionId":"thread-1","turnState":"needs_input","finalText":"first question","finalTextSource":"provider_message"}`)
+	assertPromptRuntimeFrame(t, receiveRuntimeInputFrame(t, interaction.sent), "human_message", "human-2")
+
+	resumed, err := configDB.GetProjectRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("get resumed run: %v", err)
+	}
+	if resumed.Status != domain.ProjectRunStatusRunning || !resumed.CompletedAt.IsZero() {
+		t.Fatalf("resumed run = %#v, want nonterminal running state", resumed)
+	}
+
+	interaction.frames <- promptRuntimeStdoutFrame(`{"v":1,"seq":2,"type":"agent_turn_completed","provider":"codex","sessionId":"thread-1","turnState":"needs_input","finalText":"second question","finalTextSource":"provider_message"}`)
+	assertPromptRuntimeFrame(t, receiveRuntimeInputFrame(t, interaction.sent), "eof", "")
+	interaction.frames <- driverpkg.RuntimeOutputFrame{Type: driverpkg.RuntimeOutputResult, Result: &driverpkg.RuntimeResult{OperationID: runID, Success: true}}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunProjectCommandAttach returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RunProjectCommandAttach did not finish")
+	}
+	stored, err := configDB.GetProjectRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("get waiting run: %v", err)
+	}
+	if stored.Status != domain.ProjectRunStatusWaitingForInput || !stored.CompletedAt.IsZero() {
+		t.Fatalf("stored run = %#v, want nonterminal waiting_for_input", stored)
+	}
+	if len(configDB.events) != 8 || configDB.events[0].Kind != domain.ProjectRunEventKindUserMessage || configDB.events[1].Kind != domain.ProjectRunEventKindStatus || configDB.events[2].Kind != domain.ProjectRunEventKindAgentMessage || configDB.events[3].Kind != domain.ProjectRunEventKindStatus || configDB.events[4].Kind != domain.ProjectRunEventKindUserMessage || configDB.events[5].Kind != domain.ProjectRunEventKindStatus || configDB.events[6].Kind != domain.ProjectRunEventKindAgentMessage || configDB.events[7].Kind != domain.ProjectRunEventKindStatus {
+		t.Fatalf("prompt attach events = %#v, want user/status/agent/status for both turns", configDB.events)
 	}
 }
 
@@ -1609,7 +1721,9 @@ func persistControllerFixtureRun(t *testing.T, fixture *controllerRunFixture, ru
 func assertNoTerminalStatusEvent(t *testing.T, events []domain.ProjectRunEventRecord) {
 	t.Helper()
 	for _, event := range events {
-		if event.Kind == domain.ProjectRunEventKindStatus {
+		// A pending -> running edge is now projected as a status event too;
+		// its empty result payload is distinct from terminal completion data.
+		if event.Kind == domain.ProjectRunEventKindStatus && event.PayloadJSON != "{}" {
 			t.Fatalf("unexpected terminal status event: %#v", event)
 		}
 	}
@@ -2689,6 +2803,30 @@ func (s *fakeControllerStore) UpdateProjectRunWithEvents(ctx context.Context, ru
 	updated, err := s.UpdateProjectRun(ctx, run)
 	s.events = append(s.events, events...)
 	return updated, err
+}
+
+func (s *fakeControllerStore) AppendProjectRunEvent(_ context.Context, event domain.ProjectRunEventRecord) (domain.ProjectRunEventRecord, bool, error) {
+	for _, existing := range s.events {
+		if existing.ID == event.ID {
+			return existing, false, nil
+		}
+	}
+	s.events = append(s.events, event)
+	return event, true, nil
+}
+
+func (s *fakeControllerStore) AppendProjectRunEvents(ctx context.Context, events []domain.ProjectRunEventRecord) ([]domain.ProjectRunEventRecord, []bool, error) {
+	stored := make([]domain.ProjectRunEventRecord, 0, len(events))
+	created := make([]bool, 0, len(events))
+	for _, event := range events {
+		item, wasCreated, err := s.AppendProjectRunEvent(ctx, event)
+		if err != nil {
+			return nil, nil, err
+		}
+		stored = append(stored, item)
+		created = append(created, wasCreated)
+	}
+	return stored, created, nil
 }
 
 func (s *fakeControllerStore) GetProjectRevision(context.Context, string, int64) (domain.ProjectRevisionRecord, error) {

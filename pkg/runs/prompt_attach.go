@@ -170,8 +170,25 @@ func (c *Controller) runPromptInteractionSession(ctx context.Context, runCtx int
 	} else {
 		releasePromptTurn(turnReady)
 	}
-	go pumpRunPromptAttachInput(inputCtx, receive, promptInputPump{Input: input, TurnReady: turnReady, OnHumanMessage: projector.AppendHumanMessageFrame})
-	return receivePromptInteractionFrames(run, sandbox, transition, promptInteractionReceiveState{Interaction: interaction, Projector: projector, TurnReady: turnReady}, send)
+	onHumanMessage := func(message, clientMessageID string) error {
+		if err := projector.AppendHumanMessageFrame(message, clientMessageID); err != nil {
+			return err
+		}
+		if runCtx.Coordinator == nil {
+			return fmt.Errorf("prompt resume transition requires coordinator")
+		}
+		// The message event retains its own idempotency boundary. The companion
+		// state transition records that this persisted reply has resumed work.
+		_, err := runCtx.Coordinator.MarkRunning(context.WithoutCancel(ctx), run.RunID, sandbox.Summary.ID)
+		return err
+	}
+	go pumpRunPromptAttachInput(inputCtx, receive, promptInputPump{Input: input, TurnReady: turnReady, OnHumanMessage: onHumanMessage})
+	return receivePromptInteractionFrames(ctx, run, sandbox, transition, promptInteractionReceiveState{
+		Interaction: interaction,
+		Projector:   projector,
+		Coordinator: runCtx.Coordinator,
+		TurnReady:   turnReady,
+	}, send)
 }
 
 // promptInteractionReceiveState bundles the open interaction, log
@@ -180,10 +197,11 @@ func (c *Controller) runPromptInteractionSession(ctx context.Context, runCtx int
 type promptInteractionReceiveState struct {
 	Interaction driverpkg.RuntimeInteraction
 	Projector   *promptAttachProjector
+	Coordinator *Coordinator
 	TurnReady   chan struct{}
 }
 
-func receivePromptInteractionFrames(run domain.ProjectRunRecord, sandbox *domain.Sandbox, transition TransitionRequest, state promptInteractionReceiveState, send RunAttachSender) (TransitionRequest, error) {
+func receivePromptInteractionFrames(ctx context.Context, run domain.ProjectRunRecord, sandbox *domain.Sandbox, transition TransitionRequest, state promptInteractionReceiveState, send RunAttachSender) (TransitionRequest, error) {
 	interaction, projector, turnReady := state.Interaction, state.Projector, state.TurnReady
 	logsPath := transition.LogsPath
 	var promptTransition *TransitionRequest
@@ -230,6 +248,7 @@ func receivePromptInteractionFrames(run domain.ProjectRunRecord, sandbox *domain
 				transition.Error = fmt.Sprintf("agent execution failed: %v", err)
 				return transition, err
 			}
+			turnCompleted := false
 			for _, resp := range responses {
 				if err := send(resp); err != nil {
 					transition.ExitCode = 1
@@ -237,11 +256,28 @@ func receivePromptInteractionFrames(run domain.ProjectRunRecord, sandbox *domain
 					return transition, err
 				}
 				if resp.Kind == RunAttachOutputAgentTurnCompleted {
-					releasePromptTurn(turnReady)
+					turnCompleted = true
 				}
 			}
 			if nextTransition != nil {
 				promptTransition = nextTransition
+				if nextTransition.Status == domain.ProjectRunStatusWaitingForInput {
+					if state.Coordinator == nil {
+						return transition, fmt.Errorf("prompt waiting transition requires coordinator")
+					}
+					// A runtime can remain attached while awaiting the next human
+					// message. Persist the pause now, with its assistant/status
+					// events, rather than deferring it until the runtime exits.
+					if _, err := state.Coordinator.TransitionRun(context.WithoutCancel(ctx), *nextTransition); err != nil {
+						return transition, err
+					}
+				}
+			}
+			// Do not let the input pump send a reply until a needs-input turn has
+			// durably entered waiting_for_input. The next human message can then
+			// atomically observe and resume that exact lifecycle edge.
+			if turnCompleted {
+				releasePromptTurn(turnReady)
 			}
 		case driverpkg.RuntimeOutputStderr:
 			if err := projector.AppendStderr(string(frame.Data)); err != nil {

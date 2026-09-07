@@ -77,6 +77,50 @@ func TestCoordinatorWaitingForInputPersistsAgentAndStatusEventsAtomically(t *tes
 	}
 }
 
+func TestCoordinatorPendingToRunningPersistsStatusEvent(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 9, 7, 10, 0, 0, 0, time.UTC)
+	store := &fakeRunStore{runs: map[string]domain.ProjectRunRecord{
+		"run-starting": {RunID: "run-starting", Status: domain.ProjectRunStatusPending},
+	}}
+	coordinator := NewCoordinator(store, nil)
+	coordinator.SetNow(func() time.Time { return now })
+
+	updated, err := coordinator.MarkRunning(context.Background(), "run-starting", "sandbox-1")
+	if err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	if updated.Status != domain.ProjectRunStatusRunning || !updated.StartedAt.Equal(now) {
+		t.Fatalf("updated run = %#v, want running at %s", updated, now)
+	}
+	if len(store.events) != 1 || store.events[0].Kind != domain.ProjectRunEventKindStatus {
+		t.Fatalf("stored events = %#v, want running status event", store.events)
+	}
+}
+
+func TestCoordinatorWaitingForInputCanResumeRunning(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 9, 7, 10, 0, 0, 0, time.UTC)
+	store := &fakeRunStore{runs: map[string]domain.ProjectRunRecord{
+		"run-resuming": {RunID: "run-resuming", Status: domain.ProjectRunStatusWaitingForInput, StartedAt: now.Add(-time.Minute)},
+	}}
+	coordinator := NewCoordinator(store, nil)
+	coordinator.SetNow(func() time.Time { return now })
+
+	updated, err := coordinator.MarkRunning(context.Background(), "run-resuming", "sandbox-1")
+	if err != nil {
+		t.Fatalf("resume running: %v", err)
+	}
+	if updated.Status != domain.ProjectRunStatusRunning || !updated.CompletedAt.IsZero() {
+		t.Fatalf("updated run = %#v, want resumed nonterminal running state", updated)
+	}
+	if len(store.events) != 1 || store.events[0].Kind != domain.ProjectRunEventKindStatus {
+		t.Fatalf("stored events = %#v, want resume status event", store.events)
+	}
+}
+
 func TestCoordinatorConversationTerminalStatusesCannotRestart(t *testing.T) {
 	t.Parallel()
 
