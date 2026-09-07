@@ -107,19 +107,27 @@ func (h *RuntimeHost) hasActiveConversation(ctx context.Context) (bool, error) {
 	if h.deps.ProjectRuns == nil {
 		return false, nil
 	}
+	const projectRunPageSize = 200
 	for _, status := range []string{domain.ProjectRunStatusRunning, domain.ProjectRunStatusWaitingForInput} {
-		items, err := h.deps.ProjectRuns.ListProjectRunsByOptions(ctx, domain.ProjectRunListOptions{
-			ProjectID: h.scheduler.Summary.ProjectID, AgentName: h.scheduler.Summary.AgentName, Status: status, Limit: 1,
-		})
-		if err != nil {
-			return false, fmt.Errorf("list active project conversations: %w", err)
-		}
-		for _, run := range items {
-			// Only the durable interactive marker denotes a reply-capable stream.
-			// A normal single-turn prompt may be running concurrently with a schedule.
-			if run.InteractiveConversation {
-				return true, nil
+		for offset := 0; ; {
+			items, err := h.deps.ProjectRuns.ListProjectRunsByOptions(ctx, domain.ProjectRunListOptions{
+				ProjectID: h.scheduler.Summary.ProjectID, AgentName: h.scheduler.Summary.AgentName,
+				Status: status, Limit: projectRunPageSize, Offset: offset,
+			})
+			if err != nil {
+				return false, fmt.Errorf("list active project conversations: %w", err)
 			}
+			for _, run := range items {
+				// Only the durable interactive marker denotes a reply-capable stream.
+				// A normal single-turn prompt may be running concurrently with a schedule.
+				if run.InteractiveConversation {
+					return true, nil
+				}
+			}
+			if len(items) < projectRunPageSize {
+				break
+			}
+			offset += len(items)
 		}
 	}
 	return false, nil

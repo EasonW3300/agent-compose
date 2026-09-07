@@ -64,6 +64,26 @@ func TestSchedulerOnlySkipsDurableInteractiveConversations(t *testing.T) {
 	}
 }
 
+func TestSchedulerSkipsOlderInteractiveConversationWhenNewerRunIsOrdinary(t *testing.T) {
+	runs := &activeConversationRunLister{runs: []domain.ProjectRunRecord{
+		{RunID: "newer-single-turn", ProjectID: "project-1", AgentName: "reviewer", Prompt: "run once", Status: domain.ProjectRunStatusRunning},
+		interactiveConversationRun("older-interactive", domain.ProjectRunStatusRunning),
+	}}
+	runner := &hostProjectAgentRunnerFake{}
+	host := schedulers.NewRuntimeHost(schedulers.RunHostDependencies{
+		ProjectRuns:        runs,
+		ProjectAgentRunner: runner,
+	}, domain.Scheduler{Summary: domain.SchedulerSummary{ID: "scheduler-1", ProjectID: "project-1", AgentName: "reviewer"}}, schedulers.RuntimeExecutionContext{ID: "scheduler-run-1", Kind: schedulers.ExecutionKindTrigger}, schedulers.TriggerEventMetadata{})
+
+	_, err := host.Agent(context.Background(), "scheduled prompt", domain.SchedulerAgentRequest{})
+	if !errors.Is(err, schedulers.ErrActiveConversation) {
+		t.Fatalf("Agent error = %v, want ErrActiveConversation", err)
+	}
+	if len(runner.requests) != 0 {
+		t.Fatalf("project agent runner called %d times, want 0", len(runner.requests))
+	}
+}
+
 func interactiveConversationRun(runID, status string) domain.ProjectRunRecord {
 	run := domain.ProjectRunRecord{RunID: runID, ProjectID: "project-1", AgentName: "reviewer", Prompt: "ask the user", Status: status}
 	markInteractiveConversation(&run)
@@ -81,6 +101,22 @@ type activeConversationRunLister struct {
 	runs []domain.ProjectRunRecord
 }
 
-func (l *activeConversationRunLister) ListProjectRunsByOptions(context.Context, domain.ProjectRunListOptions) ([]domain.ProjectRunRecord, error) {
-	return l.runs, nil
+func (l *activeConversationRunLister) ListProjectRunsByOptions(_ context.Context, options domain.ProjectRunListOptions) ([]domain.ProjectRunRecord, error) {
+	items := make([]domain.ProjectRunRecord, 0, len(l.runs))
+	for _, run := range l.runs {
+		if (options.ProjectID == "" || run.ProjectID == options.ProjectID) &&
+			(options.AgentName == "" || run.AgentName == options.AgentName) &&
+			(options.Status == "" || run.Status == options.Status) {
+			items = append(items, run)
+		}
+	}
+	offset := options.Offset
+	if offset >= len(items) {
+		return nil, nil
+	}
+	limit := options.Limit
+	if limit <= 0 || offset+limit > len(items) {
+		limit = len(items) - offset
+	}
+	return items[offset : offset+limit], nil
 }
