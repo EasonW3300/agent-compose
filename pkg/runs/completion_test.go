@@ -107,6 +107,44 @@ func TestE2ECompletionManagerPersistsEventsBeforeCleanupAndRetriesFirstResult(t 
 	TestCompletionManagerPersistsEventsBeforeCleanupAndRetriesFirstResult(t)
 }
 
+func TestCompletionManagerPreservesConversationTerminalTimingByOrigin(t *testing.T) {
+	ctx := context.Background()
+	startedAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Millisecond)
+	for _, origin := range []string{domain.ProjectRunStatusPending, domain.ProjectRunStatusRunning} {
+		for _, terminal := range []string{domain.ProjectRunStatusTimedOut, domain.ProjectRunStatusInterrupted} {
+			t.Run(origin+"_to_"+terminal, func(t *testing.T) {
+				store := newCompletionTestStore(t)
+				runStartedAt := time.Time{}
+				if origin == domain.ProjectRunStatusRunning {
+					runStartedAt = startedAt
+				}
+				run := createCompletionTestRun(t, store, domain.ProjectRunRecord{
+					RunID: "completion-" + origin + "-" + terminal, ProjectID: "project-1", AgentName: "worker", AgentID: "agent-1",
+					Status: origin, StartedAt: runStartedAt,
+				})
+				manager := runs.NewCompletionManager(runs.CompletionManagerDeps{Store: store})
+
+				completed, err := manager.Complete(ctx, runs.TransitionRequest{RunID: run.RunID, Status: terminal})
+				if err != nil {
+					t.Fatalf("complete %s run as %s: %v", origin, terminal, err)
+				}
+				if completed.Status != terminal || completed.CompletedAt.IsZero() {
+					t.Fatalf("completed run = %#v, want terminal %s with completion time", completed, terminal)
+				}
+				if origin == domain.ProjectRunStatusPending {
+					if !completed.StartedAt.IsZero() || completed.DurationMs != 0 {
+						t.Fatalf("completed pending run = %#v, want zero start time and duration", completed)
+					}
+					return
+				}
+				if !completed.StartedAt.Equal(startedAt) || completed.DurationMs <= 0 {
+					t.Fatalf("completed running run = %#v, want start at %s with positive duration", completed, startedAt)
+				}
+			})
+		}
+	}
+}
+
 type completionSandboxStoreFake struct{ sandbox *domain.Sandbox }
 
 func (s completionSandboxStoreFake) GetSandbox(context.Context, string) (*domain.Sandbox, error) {

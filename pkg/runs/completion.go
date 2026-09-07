@@ -264,11 +264,18 @@ func (m *CompletionManager) process(ctx context.Context, runID string) (domain.P
 	next := run
 	next.Status = completion.TargetStatus
 	applyProjectRunTransitionFields(&next, req)
-	if next.StartedAt.IsZero() {
+	// A timeout or interruption may be finalized directly from the queue. Keep
+	// that run observably unstarted instead of manufacturing execution time.
+	queuedConversationTerminal := run.Status == domain.ProjectRunStatusPending && (completion.TargetStatus == domain.ProjectRunStatusTimedOut || completion.TargetStatus == domain.ProjectRunStatusInterrupted)
+	if next.StartedAt.IsZero() && !queuedConversationTerminal {
 		next.StartedAt = now
 	}
 	next.CompletedAt = now
-	next.DurationMs = max(0, next.CompletedAt.Sub(next.StartedAt).Milliseconds())
+	if next.StartedAt.IsZero() {
+		next.DurationMs = 0
+	} else {
+		next.DurationMs = max(0, next.CompletedAt.Sub(next.StartedAt).Milliseconds())
+	}
 	statusEvent := domain.ProjectRunEventRecord{ID: terminalStatusEventID(runID), RunID: runID, Kind: domain.ProjectRunEventKindStatus, PayloadJSON: next.ResultJSON, Success: next.Status == domain.ProjectRunStatusSucceeded, ExitCode: next.ExitCode, StopReason: next.Error}
 	return m.store.FinalizeProjectRunCompletion(ctx, next, statusEvent)
 }

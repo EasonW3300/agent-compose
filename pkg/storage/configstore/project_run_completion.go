@@ -42,9 +42,14 @@ func (s *projectStore) StageProjectRunCompletion(ctx context.Context, completion
 		if _, _, err := appendProjectRunEventsTx(ctx, tx, events); err != nil {
 			return domain.ProjectRunCompletionRecord{}, false, fmt.Errorf("append staged project run completion events: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE project_run SET status = 'running', cleanup_error = '',
-			started_at = CASE WHEN started_at = 0 THEN ? ELSE started_at END, updated_at = ?
-			WHERE run_id = ? AND status IN ('pending', 'running')`, now.UnixMilli(), now.Unix(), completion.RunID); err != nil {
+		// Keep queued timeouts and interruptions visibly unstarted through the
+		// completion journal; other terminal work remains active while cleanup runs.
+		if _, err := tx.ExecContext(ctx, `UPDATE project_run SET
+			status = CASE WHEN status = 'pending' AND ? IN ('timed_out', 'interrupted') THEN status ELSE 'running' END,
+			cleanup_error = '',
+			started_at = CASE WHEN started_at = 0 AND NOT (status = 'pending' AND ? IN ('timed_out', 'interrupted')) THEN ? ELSE started_at END,
+			updated_at = ?
+			WHERE run_id = ? AND status IN ('pending', 'running')`, completion.TargetStatus, completion.TargetStatus, now.UnixMilli(), now.Unix(), completion.RunID); err != nil {
 			return domain.ProjectRunCompletionRecord{}, false, fmt.Errorf("keep project run %s active during completion: %w", completion.RunID, err)
 		}
 	}
