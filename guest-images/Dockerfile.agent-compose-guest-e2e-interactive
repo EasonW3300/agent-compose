@@ -1,0 +1,11 @@
+# This image exists only for the opt-in interactive-conversation Docker E2E.
+# It inherits the real runtime, then redirects the Codex SDK to a deterministic
+# local executable so the test never depends on account credentials or a network.
+ARG BASE_IMAGE=local/agent-compose-guest:interactive
+FROM ${BASE_IMAGE}
+
+COPY guest-images/e2e/fake-codex-interactive.js /usr/local/bin/agent-compose-e2e-fake-codex
+RUN chmod 0755 /usr/local/bin/agent-compose-e2e-fake-codex
+
+# CodexRunner honors CODEX_BIN before the production /usr/bin/codex path.
+ENV CODEX_BIN=/usr/local/bin/agent-compose-e2e-fake-codex
