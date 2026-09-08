@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -289,5 +290,34 @@ func e2eRepoRoot(t *testing.T) string {
 			t.Fatalf("find repository root from %s", dir)
 		}
 		dir = parent
+	}
+}
+
+// newDockerVisibleE2ETempRoot avoids the long per-user test paths that exceed
+// macOS Unix-domain socket limits while remaining available to Docker Desktop.
+func newDockerVisibleE2ETempRoot(t *testing.T, prefix string) string {
+	t.Helper()
+	root, err := os.MkdirTemp(dockerVisibleE2ETempBase(), "agent-compose-e2e-"+prefix)
+	if err != nil {
+		t.Fatalf("create Docker-visible E2E root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	return root
+}
+
+func dockerVisibleE2ETempBase() string {
+	if runtime.GOOS == "darwin" {
+		return "/private/tmp"
+	}
+	return "/tmp"
+}
+
+func TestNewDockerVisibleE2ETempRootKeepsDaemonSocketPathShort(t *testing.T) {
+	root := newDockerVisibleE2ETempRoot(t, "interactive-conversation-")
+	if want, got := dockerVisibleE2ETempBase(), filepath.Dir(root); got != want {
+		t.Fatalf("E2E root parent = %q, want %q", got, want)
+	}
+	if socketPath := filepath.Join(root, "agent-compose.sock"); len(socketPath) >= 104 {
+		t.Fatalf("daemon socket path length = %d, want less than macOS Unix socket limit: %q", len(socketPath), socketPath)
 	}
 }
