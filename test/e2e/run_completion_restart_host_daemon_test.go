@@ -19,6 +19,117 @@ import (
 
 const dockerRunCompletionE2EImageEnv = "AGENT_COMPOSE_E2E_RUN_COMPLETION_IMAGE"
 
+func TestInteractiveRunWaitsThenCompletesAfterReply(t *testing.T) {
+	runInteractiveConversationLifecycleE2E(t)
+}
+
+// runInteractiveConversationLifecycleE2E drives the daemon through the public
+// Connect boundary. The prompt requires a human-supplied path, so the durable
+// runtime stream must remain available while the run waits for that reply.
+func runInteractiveConversationLifecycleE2E(t *testing.T) {
+	t.Helper()
+	image := strings.TrimSpace(os.Getenv(dockerRunCompletionE2EImageEnv))
+	if image == "" {
+		t.Skipf("set %s to a local Docker guest image", dockerRunCompletionE2EImageEnv)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	repoRoot := e2eRepoRoot(t)
+	testRoot, err := os.MkdirTemp(repoRoot, ".docker-interactive-conversation-e2e-")
+	if err != nil {
+		t.Fatalf("create Docker-visible E2E root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(testRoot) })
+	dockerClient := newE2EDockerClient(t, ctx, image)
+	binary := e2eDaemonBinary(t, ctx, repoRoot, testRoot)
+	listenAddress := unusedLoopbackAddress(t)
+	baseURL := "http://" + listenAddress
+	daemon := startE2EDaemonWithEnv(t, binary, repoRoot, testRoot, listenAddress, image, map[string]string{
+		"AGENT_COMPOSE_RUNTIME_BASE_URL": dockerDesktopRuntimeBaseURL(t, listenAddress),
+	})
+	waitForE2EDaemon(t, ctx, daemon, baseURL)
+
+	httpClient := newE2EHTTPClient()
+	projectClient := agentcomposev2connect.NewProjectServiceClient(httpClient, baseURL)
+	runClient := agentcomposev2connect.NewRunServiceClient(httpClient, baseURL)
+	projectID := applyE2ERunCompletionProject(t, ctx, projectClient, testRoot, image)
+
+	started, err := runClient.StartInteractiveAgentRun(ctx, connect.NewRequest(&agentcomposev2.StartAgentRunRequest{
+		Run: &agentcomposev2.RunAgentRequest{
+			ProjectId:       projectID,
+			AgentName:       "worker",
+			Prompt:          "Ask the human for the required work-log path before doing any work. After the human replies with a path, confirm the work is complete.",
+			Source:          agentcomposev2.RunSource_RUN_SOURCE_API,
+			ClientRequestId: "docker-interactive-conversation-start",
+		},
+	}))
+	if err != nil {
+		t.Fatalf("StartInteractiveAgentRun returned error: %v\ndaemon log:\n%s", err, daemon.logs.String())
+	}
+	runID := started.Msg.GetRun().GetRunId()
+	if runID == "" || !started.Msg.GetStarted() {
+		t.Fatalf("StartInteractiveAgentRun response = %#v, want newly started run", started.Msg)
+	}
+
+	var waiting *agentcomposev2.RunDetail
+	waitForE2ECondition(t, 2*time.Minute, func() bool {
+		response, getErr := runClient.GetRun(ctx, connect.NewRequest(&agentcomposev2.GetRunRequest{RunId: runID}))
+		if getErr != nil {
+			return false
+		}
+		waiting = response.Msg.GetRun()
+		summary := waiting.GetSummary()
+		switch summary.GetStatus() {
+		case agentcomposev2.RunStatus_RUN_STATUS_WAITING_FOR_INPUT:
+			return true
+		case agentcomposev2.RunStatus_RUN_STATUS_SUCCEEDED, agentcomposev2.RunStatus_RUN_STATUS_FAILED,
+			agentcomposev2.RunStatus_RUN_STATUS_CANCELED, agentcomposev2.RunStatus_RUN_STATUS_TIMED_OUT,
+			agentcomposev2.RunStatus_RUN_STATUS_INTERRUPTED:
+			t.Fatalf("interactive run reached terminal status before human reply: status=%s error=%q\ndaemon log:\n%s", summary.GetStatus(), summary.GetError(), daemon.logs.String())
+		}
+		return false
+	}, "interactive run did not wait for human input")
+	if sandboxID := waiting.GetSummary().GetSandboxId(); sandboxID != "" {
+		t.Cleanup(func() {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cleanupCancel()
+			removeE2EDockerSandboxFallback(t, cleanupCtx, dockerClient, sandboxID)
+		})
+	}
+
+	replied, err := runClient.SendRunHumanMessage(ctx, connect.NewRequest(&agentcomposev2.SendRunHumanMessageRequest{
+		RunId: runID, Text: "/workspace/work-log.md", ClientMessageId: "docker-interactive-conversation-reply",
+	}))
+	if err != nil {
+		t.Fatalf("SendRunHumanMessage returned error: %v\ndaemon log:\n%s", err, daemon.logs.String())
+	}
+	if got := replied.Msg.GetRun().GetRunId(); got != runID {
+		t.Fatalf("SendRunHumanMessage run ID = %q, want %q", got, runID)
+	}
+
+	var completed *agentcomposev2.RunDetail
+	waitForE2ECondition(t, 2*time.Minute, func() bool {
+		response, getErr := runClient.GetRun(ctx, connect.NewRequest(&agentcomposev2.GetRunRequest{RunId: runID}))
+		if getErr != nil {
+			return false
+		}
+		completed = response.Msg.GetRun()
+		summary := completed.GetSummary()
+		switch summary.GetStatus() {
+		case agentcomposev2.RunStatus_RUN_STATUS_SUCCEEDED:
+			return true
+		case agentcomposev2.RunStatus_RUN_STATUS_FAILED, agentcomposev2.RunStatus_RUN_STATUS_CANCELED,
+			agentcomposev2.RunStatus_RUN_STATUS_TIMED_OUT, agentcomposev2.RunStatus_RUN_STATUS_INTERRUPTED:
+			t.Fatalf("interactive run did not complete after human reply: status=%s error=%q\ndaemon log:\n%s", summary.GetStatus(), summary.GetError(), daemon.logs.String())
+		}
+		return false
+	}, "interactive run did not complete after human reply")
+	if completed.GetSummary().GetCompletedAt() == nil {
+		t.Fatalf("completed interactive run = %#v, want completed_at", completed)
+	}
+}
+
 func TestE2EDockerRunCompletionRecoversAfterDaemonHardKill(t *testing.T) {
 	image := strings.TrimSpace(os.Getenv(dockerRunCompletionE2EImageEnv))
 	if image == "" {
