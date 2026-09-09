@@ -4,6 +4,11 @@
 ARG BASE_IMAGE=local/agent-compose-guest:interactive
 FROM ${BASE_IMAGE}
 
+# The base image can predate the branch under test. Overlay this checkout's
+# compiled runtime so its framed turn-state contract is exercised end-to-end.
+# Its production dependencies remain those installed by the real guest image.
+COPY runtime/javascript/dist /usr/lib/node_modules/@chaitin-ai/agent-compose-runtime/dist
+
 COPY guest-images/e2e/fake-codex-interactive.js /usr/local/bin/agent-compose-e2e-fake-codex
 RUN chmod 0755 /usr/local/bin/agent-compose-e2e-fake-codex
 

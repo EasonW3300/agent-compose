@@ -21,6 +21,8 @@ grep -Fqx 'ENV CODEX_BIN=/usr/local/bin/agent-compose-e2e-fake-codex' "$dockerfi
   || fail "test guest must override Codex only through its image environment"
 grep -Fq 'COPY guest-images/e2e/fake-codex-interactive.js /usr/local/bin/agent-compose-e2e-fake-codex' "$dockerfile" \
   || fail "test guest must install the deterministic Codex fixture"
+grep -Fq 'COPY runtime/javascript/dist /usr/lib/node_modules/@chaitin-ai/agent-compose-runtime/dist' "$dockerfile" \
+  || fail "test guest must overlay the current-branch compiled runtime rather than inherit a stale runtime from its base image"
 grep -Fq 'state: "needs_input"' "$fake_codex" \
   || fail "fixture must emit an explicit needs_input envelope"
 grep -Fq 'state: "completed"' "$fake_codex" \

@@ -67,6 +67,7 @@ func TestConversationSurvivesObserverDisconnectAndResumes(t *testing.T) {
 	}
 
 	interaction.frames <- promptRuntimeStdoutFrame(`{"v":1,"seq":2,"type":"agent_turn_completed","provider":"codex","turnState":"completed","finalText":"已整理","finalTextSource":"provider_message"}`)
+	assertPromptRuntimeFrame(t, receiveRuntimeInputFrame(t, interaction.sent), "eof", "")
 	interaction.frames <- driverpkg.RuntimeOutputFrame{Type: driverpkg.RuntimeOutputResult, Result: &driverpkg.RuntimeResult{OperationID: run.RunID, Success: true}}
 	assertConversationStatus(t, store, run.RunID, domain.ProjectRunStatusSucceeded)
 	close(interaction.frames)

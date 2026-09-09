@@ -276,6 +276,7 @@ func receivePromptInteractionFrames(ctx context.Context, run domain.ProjectRunRe
 				return transition, err
 			}
 			turnCompleted := false
+			closeInputAfterTurn := false
 			for _, resp := range responses {
 				if err := send(resp); err != nil {
 					transition.ExitCode = 1
@@ -298,12 +299,25 @@ func receivePromptInteractionFrames(ctx context.Context, run domain.ProjectRunRe
 					if _, err := state.Coordinator.TransitionRun(context.WithoutCancel(ctx), *nextTransition); err != nil {
 						return transition, err
 					}
+				} else if nextTransition.Status == domain.ProjectRunStatusSucceeded {
+					// A completed turn is terminal, but the runtime keeps its stream
+					// open for further human messages until stdin reaches EOF. Close
+					// only the input half so it can emit its final result frame and
+					// let the existing terminal-transition path finish the run.
+					closeInputAfterTurn = true
+				}
+			}
+			if closeInputAfterTurn {
+				if err := interaction.CloseSend(); err != nil {
+					transition.ExitCode = 1
+					transition.Error = fmt.Sprintf("close completed conversation input: %v", err)
+					return transition, err
 				}
 			}
 			// Do not let the input pump send a reply until a needs-input turn has
 			// durably entered waiting_for_input. The next human message can then
 			// atomically observe and resume that exact lifecycle edge.
-			if turnCompleted {
+			if turnCompleted && !closeInputAfterTurn {
 				releasePromptTurn(turnReady)
 			}
 		case driverpkg.RuntimeOutputStderr:
