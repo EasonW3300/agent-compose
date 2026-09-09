@@ -143,6 +143,7 @@ func (c *Controller) runPromptInteractionSession(ctx context.Context, runCtx int
 	go pumpRunPromptAttachInput(inputCtx, receive, promptInputPump{Input: session.Input, TurnReady: session.TurnReady, OnHumanMessage: onHumanMessage})
 	return receivePromptInteractionFrames(ctx, session.Run, session.Sandbox, session.Transition, promptInteractionReceiveState{
 		Interaction: session.Interaction,
+		Input:       session.Input,
 		Projector:   session.Projector,
 		Coordinator: runCtx.Coordinator,
 		TurnReady:   session.TurnReady,
@@ -223,6 +224,7 @@ func (c *Controller) openPromptInteractionSession(ctx context.Context, runCtx in
 // pumps frames from the runtime until the interaction ends.
 type promptInteractionReceiveState struct {
 	Interaction driverpkg.RuntimeInteraction
+	Input       *promptWrapperInput
 	Projector   *promptAttachProjector
 	Coordinator *Coordinator
 	TurnReady   chan struct{}
@@ -301,14 +303,14 @@ func receivePromptInteractionFrames(ctx context.Context, run domain.ProjectRunRe
 					}
 				} else if nextTransition.Status == domain.ProjectRunStatusSucceeded {
 					// A completed turn is terminal, but the runtime keeps its stream
-					// open for further human messages until stdin reaches EOF. Close
-					// only the input half so it can emit its final result frame and
-					// let the existing terminal-transition path finish the run.
+					// open for further human messages until it receives the framed
+					// EOF command. Send it so the runtime emits its final result
+					// frame and the existing terminal-transition path can finish.
 					closeInputAfterTurn = true
 				}
 			}
 			if closeInputAfterTurn {
-				if err := interaction.CloseSend(); err != nil {
+				if err := state.Input.EOF(); err != nil {
 					transition.ExitCode = 1
 					transition.Error = fmt.Sprintf("close completed conversation input: %v", err)
 					return transition, err

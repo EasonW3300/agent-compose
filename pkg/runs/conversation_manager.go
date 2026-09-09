@@ -400,7 +400,7 @@ func (m *ConversationManager) runConversation(conversation *managedConversation)
 	}()
 
 	transition, err := receivePromptInteractionFrames(conversation.context, conversation.session.Run, conversation.session.Sandbox, conversation.session.Transition, promptInteractionReceiveState{
-		Interaction: conversation.session.Interaction, Projector: conversation.session.Projector, Coordinator: conversation.coordinator, TurnReady: conversation.session.TurnReady,
+		Interaction: conversation.session.Interaction, Input: conversation.session.Input, Projector: conversation.session.Projector, Coordinator: conversation.coordinator, TurnReady: conversation.session.TurnReady,
 	}, func(RunAttachOutput) error { return nil })
 	if m.isShuttingDown() {
 		return
@@ -425,9 +425,11 @@ func (m *ConversationManager) terminateConversation(conversation *managedConvers
 				RunID: conversation.runID, Status: status, SandboxID: conversation.session.Sandbox.Summary.ID, Error: reason,
 			})
 		}
-		conversation.replyMu.Lock()
-		_ = conversation.session.Input.Cancel(reason)
-		conversation.replyMu.Unlock()
+		if status != domain.ProjectRunStatusSucceeded {
+			conversation.replyMu.Lock()
+			_ = conversation.session.Input.Cancel(reason)
+			conversation.replyMu.Unlock()
+		}
 		conversation.cancel(errors.New(firstNonEmpty(reason, string(status))))
 	})
 }

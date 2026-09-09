@@ -101,6 +101,7 @@ func TestConversationReplyRetryAfterCompletionReturnsDurableResult(t *testing.T)
 	}
 	assertPromptRuntimeFrame(t, receiveRuntimeInputFrame(t, interaction.sent), "human_message", "/workspace/log.md")
 	interaction.frames <- promptRuntimeStdoutFrame(`{"v":1,"seq":2,"type":"agent_turn_completed","provider":"codex","turnState":"completed","finalText":"已整理","finalTextSource":"provider_message"}`)
+	assertPromptRuntimeFrame(t, receiveRuntimeInputFrame(t, interaction.sent), "eof", "")
 	interaction.frames <- driverpkg.RuntimeOutputFrame{Type: driverpkg.RuntimeOutputResult, Result: &driverpkg.RuntimeResult{OperationID: run.RunID, Success: true}}
 	assertConversationStatus(t, store, run.RunID, domain.ProjectRunStatusSucceeded)
 	waitForConversationUnregister(t, manager, run.RunID)
@@ -118,6 +119,23 @@ func TestConversationReplyRetryAfterCompletionReturnsDurableResult(t *testing.T)
 	default:
 	}
 	close(interaction.frames)
+}
+
+func TestSynchronizedConversationStoreListsNewRunEventsAfterZeroCursor(t *testing.T) {
+	_, store, _ := newConversationManagerTestController(t)
+	created, inserted, err := store.AppendProjectRunEvent(context.Background(), domain.ProjectRunEventRecord{
+		ID: "reply-event", RunID: "run-reply", Kind: domain.ProjectRunEventKindUserMessage,
+	})
+	if err != nil || !inserted {
+		t.Fatalf("append reply event = %#v, %t, %v", created, inserted, err)
+	}
+	if created.Sequence == 0 {
+		t.Fatalf("created reply event sequence = 0, want a durable sequence above the initial cursor")
+	}
+	listed, err := store.ListProjectRunEvents(context.Background(), "run-reply", 0, 10)
+	if err != nil || len(listed) != 1 || listed[0].ID != created.ID {
+		t.Fatalf("list reply events after zero = %#v, %v", listed, err)
+	}
 }
 
 func projectRunIsInteractiveConversation(run domain.ProjectRunRecord) bool {
@@ -322,13 +340,38 @@ func (s *synchronizedConversationStore) UpdateProjectRunWithEvents(ctx context.C
 func (s *synchronizedConversationStore) AppendProjectRunEvent(ctx context.Context, event domain.ProjectRunEventRecord) (domain.ProjectRunEventRecord, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	assignSynchronizedRunEventSequence(s.fakeControllerStore.events, &event)
 	return s.fakeControllerStore.AppendProjectRunEvent(ctx, event)
 }
 
 func (s *synchronizedConversationStore) AppendProjectRunEvents(ctx context.Context, events []domain.ProjectRunEventRecord) ([]domain.ProjectRunEventRecord, []bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.fakeControllerStore.AppendProjectRunEvents(ctx, events)
+	stored := make([]domain.ProjectRunEventRecord, 0, len(events))
+	created := make([]bool, 0, len(events))
+	for _, event := range events {
+		assignSynchronizedRunEventSequence(s.fakeControllerStore.events, &event)
+		item, wasCreated, err := s.fakeControllerStore.AppendProjectRunEvent(ctx, event)
+		if err != nil {
+			return nil, nil, err
+		}
+		stored = append(stored, item)
+		created = append(created, wasCreated)
+	}
+	return stored, created, nil
+}
+
+func assignSynchronizedRunEventSequence(events []domain.ProjectRunEventRecord, event *domain.ProjectRunEventRecord) {
+	if event == nil || event.Sequence != 0 {
+		return
+	}
+	var last uint64
+	for _, existing := range events {
+		if existing.RunID == event.RunID && existing.Sequence > last {
+			last = existing.Sequence
+		}
+	}
+	event.Sequence = last + 1
 }
 
 func (s *synchronizedConversationStore) ListProjectRunEvents(_ context.Context, runID string, afterSequence uint64, limit int) ([]domain.ProjectRunEventRecord, error) {
